@@ -140,15 +140,23 @@ export default async function handler(req, res) {
   }
 
   // ── Step 2: pay the invoice via NWC ─────────────────────────────────────
+  // Wallet timeout (25s) is intentionally shorter than this function's
+  // maxDuration (60s in vercel.json) so a hung NWC reply throws a real
+  // error inside the catch block instead of letting Vercel kill the
+  // function and serve its plaintext error page (which the browser then
+  // tries to parse as JSON and shows the visitor "Unexpected token 'A',
+  // 'An error o'... is not valid JSON"). 25s also leaves ~35s headroom
+  // for the L402 retry hop and serialization.
   const stepTwoStart = Date.now();
-  const wallet = new NwcWallet(nwcUrl);
+  const wallet = new NwcWallet(nwcUrl, 25_000);
   let preimage;
   try {
     preimage = await wallet.payInvoice(invoice);
   } catch (err) {
+    const elapsedMs = Date.now() - stepTwoStart;
     return res.status(502).json({
       ok: false,
-      error: `Agent wallet failed to pay invoice: ${err?.message ?? err}`,
+      error: `Agent wallet failed to pay invoice (after ${elapsedMs}ms): ${err?.message ?? err}`,
       trace,
     });
   }
