@@ -33,7 +33,8 @@
  * "the agent bought this" result card.
  */
 
-import { NwcWallet, findL402Challenge } from "l402-requests";
+import { findL402Challenge } from "l402-requests";
+import { payViaNwc } from "./_lib/nwc.js";
 
 const SUPPORTED_ENDPOINTS = new Set(["weather", "btc-price"]);
 const MAX_SATS_PER_REQUEST = 25; // sanity ceiling — way above 1-sat demo prices
@@ -139,25 +140,31 @@ export default async function handler(req, res) {
     });
   }
 
-  // ── Step 2: pay the invoice via NWC ─────────────────────────────────────
-  // Wallet timeout (25s) is intentionally shorter than this function's
-  // maxDuration (60s in vercel.json) so a hung NWC reply throws a real
-  // error inside the catch block instead of letting Vercel kill the
-  // function and serve its plaintext error page (which the browser then
-  // tries to parse as JSON and shows the visitor "Unexpected token 'A',
-  // 'An error o'... is not valid JSON"). 25s also leaves ~35s headroom
-  // for the L402 retry hop and serialization.
+  // ── Step 2: pay the invoice via inline NWC ─────────────────────────────
+  // Inline implementation (api/_lib/nwc.js) replaces l402-requests'
+  // NwcWallet because that wallet silently drops relay "OK" messages —
+  // which is how the relay tells us our event was rejected (bad sig,
+  // rate-limit, etc.). Without surfacing those, a hung payment looks
+  // identical to a sig-rejected one, and "fix it without my help" is
+  // impossible. The inline version captures every relay message into a
+  // diagnostic trace, which is returned in the response body on failure.
+  //
+  // 25s timeout < the 60s Vercel maxDuration in vercel.json, so a hung
+  // wallet throws inside the catch and returns clean JSON.
   const stepTwoStart = Date.now();
-  const wallet = new NwcWallet(nwcUrl, 25_000);
   let preimage;
+  let nwcTrace;
   try {
-    preimage = await wallet.payInvoice(invoice);
+    const result = await payViaNwc(nwcUrl, invoice, { timeoutMs: 25_000 });
+    preimage = result.preimage;
+    nwcTrace = result.trace;
   } catch (err) {
     const elapsedMs = Date.now() - stepTwoStart;
     return res.status(502).json({
       ok: false,
       error: `Agent wallet failed to pay invoice (after ${elapsedMs}ms): ${err?.message ?? err}`,
       trace,
+      nwcTrace: err?.trace ?? null,
     });
   }
 
@@ -166,6 +173,7 @@ export default async function handler(req, res) {
     label: "Paid invoice over Lightning",
     durationMs: Date.now() - stepTwoStart,
     preimagePreview: preimage.slice(0, 16) + "…",
+    nwcSteps: nwcTrace?.length ?? 0,
   });
 
   // ── Step 3: retry with L402 token ───────────────────────────────────────
