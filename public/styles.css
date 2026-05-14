@@ -80,16 +80,19 @@ a:hover { text-decoration: underline; }
   transition: color 0.15s;
 }
 .site-nav a:hover { color: var(--white); text-decoration: none; }
-.site-nav-cta {
+/* Specificity (0,2,1) beats `.site-nav a` (0,1,1) without `!important`,
+   so the CTA's foreground color survives the dim/white siblings above
+   while remaining overridable by a more-specific or later rule. */
+.site-nav a.site-nav-cta {
   background: var(--bolt);
-  color: var(--bg) !important;
+  color: var(--bg);
   padding: 0.55rem 1.1rem;
   border-radius: 999px;
   font-weight: 700;
 }
-.site-nav-cta:hover {
+.site-nav a.site-nav-cta:hover {
   background: var(--bolt);
-  color: var(--bg) !important;
+  color: var(--bg);
   filter: brightness(1.08);
 }
 @media (max-width: 540px) {

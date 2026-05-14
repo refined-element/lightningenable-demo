@@ -139,7 +139,10 @@
     totalLine.className = "trace-summary";
     const btc = window.__BTC_RATE__;
     let usdSegment = "";
-    if (data.totalSats) {
+    // != null gates on "the backend reported a sat count" — even 0 is a
+    // real value here (free-tier endpoints, settled-but-zero refunds)
+    // and deserves a $0.00 segment rather than a missing one.
+    if (data.totalSats != null) {
       if (btc && btc.rate > 0) {
         const usd = (data.totalSats / 100_000_000) * btc.rate;
         const formatted = usd < 0.01
