@@ -23,8 +23,15 @@ push to `main`. No CLI required.
    | `DEMO_AGENT_NWC_URL` | NWC connection URL for the demo agent's spending wallet. Placeholder `nostr+walletconnect://placeholder-replace-me` is OK to start; `/api/run-agent` returns an error until you swap in a real funded URL. |
    | `LIGHTNING_ENABLE_API_BASE_URL` _(optional)_ | Override the LE API base URL. Defaults to `https://api.lightningenable.com`. |
 
-   Apply to **Production** (and **Preview** if you want PR previews to also
-   make real calls).
+   **Apply to Production ONLY.** Do not enable these env vars for **Preview**
+   on a public repo — preview deploys run code from every PR head, including
+   from external contributors, and any PR could be crafted to exfiltrate the
+   key. PR previews will still render the static frontend; calls to
+   `/api/run-agent` and the L402 endpoints will return errors, which is the
+   intended trade-off. If a contributor genuinely needs a working preview to
+   test changes that exercise the API path, create a separately rotated,
+   low-quota merchant key dedicated to preview and apply only that key to
+   **Preview** — never the production key.
 
 5. **Deploy.** Static + serverless deploy takes ~30s.
 
@@ -45,14 +52,25 @@ Advanced DNS). Vercel auto-verifies and issues the SSL cert within
 
 ## Custom domain — apex `lightningenable.com` (Phase C, later)
 
-When ready to promote the demo to the apex, see the phasing in
-`F:\Vault\projects\lightning-enable\landing-site-and-brand-direction.md`
-§ "What's blocked on what". Short version: add the apex domain in the
-Vercel project Settings → Domains; Vercel returns an `A` record (Vercel
-apex IP) plus optional `www` CNAME instructions; mirror those in
-Namecheap; Vercel issues the cert. Then add
-`<link rel="canonical" href="https://lightningenable.com/" />` on the
-re-xbk LE page (see § "SEO mechanics" in the same doc).
+When ready to promote the demo to the apex domain:
+
+1. In the Vercel project **Settings → Domains**, add `lightningenable.com`
+   (and `www.lightningenable.com` if desired).
+2. Vercel will display the records to add at Namecheap. Typically:
+   - **A Record (apex):** Host `@`, Value `76.76.21.21`, TTL Automatic.
+   - **CNAME (www, optional):** Host `www`, Value `cname.vercel-dns.com`,
+     TTL Automatic.
+3. Add those at Namecheap → Advanced DNS. Vercel auto-verifies and issues
+   the SSL cert (~5 min).
+4. To consolidate SEO authority from the legacy marketing page onto the
+   new apex, add this tag to the `<head>` of the legacy
+   `refinedelement.com/products/lightning-enable` page:
+   ```html
+   <link rel="canonical" href="https://lightningenable.com/" />
+   ```
+   Google then treats the new apex as the authoritative source while the
+   legacy page remains crawlable as a portfolio entry pointing at the
+   product site.
 
 ## Updating env vars
 
