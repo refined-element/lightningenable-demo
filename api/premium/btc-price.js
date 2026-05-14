@@ -59,10 +59,16 @@ export default async function handler(req, res) {
 
   if (!parsed) {
     try {
+      // `idempotencyKey` is unique per call so each visitor click on
+      // the public demo gets a fresh Lightning invoice. See the same
+      // comment in `weather.js` for why this is a demo-specific
+      // override; real merchants should drop the field to restore
+      // retry-safe deduplication.
       const challenge = await l402().createChallenge({
         resource: `/api/premium/btc-price`,
         priceSats: PRICE_SATS,
         description: `BTC price in ${currency}`,
+        idempotencyKey: crypto.randomUUID(),
       });
       res.setHeader(
         "WWW-Authenticate",

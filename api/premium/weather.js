@@ -45,10 +45,20 @@ export default async function handler(req, res) {
   // No credential → mint a 402 challenge.
   if (!parsed) {
     try {
+      // `idempotencyKey` is unique per call here so each visitor click
+      // on the public demo gets a fresh Lightning invoice. The LE
+      // producer API dedupes by resource+price within a 60s window by
+      // default, which is the correct behavior for real merchants
+      // (prevents charging twice on a network retry) but the wrong
+      // behavior for a public demo where back-to-back clicks need
+      // independent invoices. A real merchant copying this file as a
+      // starting point should DELETE the `idempotencyKey` line to
+      // restore retry-safe defaults.
       const challenge = await l402().createChallenge({
         resource: `/api/premium/weather`,
         priceSats: PRICE_SATS,
         description: `Weather for ${city}`,
+        idempotencyKey: crypto.randomUUID(),
       });
       res.setHeader(
         "WWW-Authenticate",
