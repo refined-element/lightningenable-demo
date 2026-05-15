@@ -390,13 +390,27 @@ export default async function handler(req, res) {
  */
 function parseBolt11Sats(bolt11) {
   if (typeof bolt11 !== "string") return null;
-  const m = bolt11.toLowerCase().match(/^ln(bc|tb)(\d+)([munp]?)/);
+  // Required structure: ln{bc|tb} + digits (amount) + multiplier
+  // (m/u/n/p) + literal "1" (bech32 separator). The required
+  // multiplier rules out amount-less invoices like `lnbc1pv...`
+  // where the `1` is the bech32 separator (not an amount) — the
+  // earlier `[munp]?` (optional multiplier) regex would have
+  // mis-parsed that as amount=1, no-multiplier, and returned a
+  // bogus 100M sat (1 BTC) value.
+  //
+  // The required trailing "1" pins down the bech32 separator, so
+  // we don't confuse a whole-BTC amount like `lnbc11p...` (which
+  // is amount=1 BTC, with bech32 separator absent in this position
+  // — actually it'd be `lnbc1...` with no multiplier, which we
+  // explicitly do not support for the demo refill flow because
+  // CoinOS will always issue with a multiplier for sub-BTC
+  // amounts).
+  const m = bolt11.toLowerCase().match(/^ln(bc|tb)(\d+)([munp])1/);
   if (!m) return null;
   const amount = parseInt(m[2], 10);
-  const mult = m[3] || "";
+  const mult = m[3];
   if (!Number.isFinite(amount) || amount <= 0) return null;
   switch (mult) {
-    case "":  return amount * 100_000_000;
     case "m": return amount * 100_000;
     case "u": return amount * 100;
     case "n":
