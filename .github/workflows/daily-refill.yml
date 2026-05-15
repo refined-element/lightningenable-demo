@@ -243,18 +243,45 @@ jobs:
             "Note: \"OpenNode balance too low\" is NOT in this list — that condition returns skipped:true and never fires this alert.")
 
           if [ -n "$existing" ]; then
-            gh issue comment "$existing" --repo "${GITHUB_REPOSITORY}" --body "$BODY"
-            # Apply the label on the existing issue too (idempotent).
-            # If the label doesn't exist, capture the reason so the
-            # operator sees *why* — better than the previous silent
-            # `|| true` that hid both missing-label and any other
-            # failure.
-            label_edit_err="$(mktemp)"
-            if ! gh issue edit "$existing" --repo "${GITHUB_REPOSITORY}" --add-label "refill-failure" 2>"$label_edit_err"; then
-              echo "::warning::gh issue edit --add-label refill-failure failed on #$existing; not fatal. stderr: $(cat "$label_edit_err")"
+            # Try to comment on the existing tracking issue. If
+            # that fails (issue locked, deleted between lookup
+            # and comment, or transient API failure), fall back to
+            # opening a fresh issue with a marker — without this,
+            # `set -euo pipefail` would abort and the operator
+            # would get no notification of the current refill
+            # failure. Mirrors the round-7 fix in the sibling
+            # daily-smoke workflow.
+            comment_err="$(mktemp)"
+            if gh issue comment "$existing" --repo "${GITHUB_REPOSITORY}" --body "$BODY" 2>"$comment_err"; then
+              # Apply the label on the existing issue (idempotent).
+              # If the label doesn't exist, capture the reason; not
+              # fatal.
+              label_edit_err="$(mktemp)"
+              if ! gh issue edit "$existing" --repo "${GITHUB_REPOSITORY}" --add-label "refill-failure" 2>"$label_edit_err"; then
+                echo "::warning::gh issue edit --add-label refill-failure failed on #$existing; not fatal. stderr: $(cat "$label_edit_err")"
+              fi
+              rm -f "$label_edit_err"
+              echo "Commented on existing issue #$existing"
+            else
+              echo "::warning::gh issue comment on #$existing failed; falling back to a fresh issue. stderr: $(cat "$comment_err")"
+              FALLBACK_NOTE=$(printf '%s\n' \
+                "" \
+                "---" \
+                "⚠️ **Comment-on-existing failed.** An open tracking issue #${existing} exists with this title, but \`gh issue comment\` could not post to it (it may be locked, deleted, or the API call failed transiently). This is a fresh issue with the same content so the alert wasn't lost. Please consolidate manually.")
+              BODY_WITH_NOTE=$(printf '%s\n%s\n' "$BODY" "$FALLBACK_NOTE")
+              fallback_err="$(mktemp)"
+              if ! gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY_WITH_NOTE" --label "refill-failure" 2>"$fallback_err"; then
+                echo "::warning::Fallback gh issue create with label failed; retrying without label. stderr: $(cat "$fallback_err")"
+                if ! gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY_WITH_NOTE" 2>"$fallback_err"; then
+                  echo "::error::Comment failed AND fallback create attempts both failed. Refill alert was NOT delivered. comment-err: $(cat "$comment_err") | create-err: $(cat "$fallback_err")"
+                  rm -f "$comment_err" "$fallback_err"
+                  exit 1
+                fi
+              fi
+              rm -f "$fallback_err"
+              echo "Opened fallback issue (comment on existing #$existing failed)"
             fi
-            rm -f "$label_edit_err"
-            echo "Commented on existing issue #$existing"
+            rm -f "$comment_err"
           elif [ "$lookup_ok" -eq 1 ]; then
             # Lookup definitively said "no open issue with this title."
             # Try with the refill-failure label; if --label fails (e.g.
