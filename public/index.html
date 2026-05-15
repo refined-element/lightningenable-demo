@@ -137,9 +137,10 @@
     APIs. They pay for tools.
   </p>
   <p class="section-lede">
-    But they can't use Stripe. Agents don't have credit cards, billing
-    addresses, or fraud histories — so today, agent traffic gets eaten
-    by the API provider or blocked at the gate.
+    But card rails aren't built for them. Stripe assumes a human
+    identity, a checkout flow, a billing address, a fraud history.
+    Agent workflows have none of those — so today, agent traffic
+    gets eaten by the API provider or blocked at the gate.
   </p>
   <p class="section-lede">
     Lightning per-request payments fit. The agent hits your endpoint,
@@ -163,9 +164,10 @@
     </li>
     <li>
       <strong>Reach buyers your card processor can't.</strong>
-      AI agents, MCP clients, and autonomous workflows can't sign up for
-      Stripe — no name, no card, no fraud identity. They can pay sats.
-      Capture revenue from a buyer class that didn't exist three years ago.
+      Card rails are built for human identity and checkout flows — agent
+      workflows need machine-native payment and auth rails instead.
+      Lightning fits. Capture revenue from a buyer class that didn't
+      exist three years ago.
     </li>
     <li>
       <strong>Settles in seconds. Final.</strong>
@@ -266,38 +268,33 @@ app.<span class="c-fn">get</span>(<span class="c-str">"/api/premium/data"</span>
   <h2 class="section-title">Live infrastructure, used today.</h2>
   <div class="proof-grid">
     <div class="proof-card">
-      <div class="proof-eyebrow">Real Lightning, right above this card</div>
+      <div class="proof-eyebrow">Real Lightning, this page</div>
       <p>
-        The demo at the top of this page isn't a mock. It's a real
-        autonomous agent settling real Bitcoin over Lightning against
-        this site — same producer API your customers' agents will hit
-        when you integrate. Click "Run the agent" again to watch a
-        fresh invoice settle in under two seconds.
+        The demo above isn't a mock. Real Bitcoin, real Lightning,
+        same producer API your customers' agents will hit.
       </p>
     </div>
     <div class="proof-card">
-      <div class="proof-eyebrow">Also for ecommerce</div>
+      <div class="proof-eyebrow">Live merchant integrations</div>
       <p>
-        Lightning Enable powers L402 stores on
-        <strong>Shopify</strong> and <strong>Kentico</strong> — agent
-        shoppers and bitcoin-aligned customers buy real products with
-        sats. Live merchants include
+        L402 ecommerce on <strong>Shopify</strong> and
+        <strong>Kentico</strong>. Live storefronts:
         <strong>Great Ghee</strong> and
-        <strong>Salt of the Earth</strong>.
+        <strong>Salt of the Earth</strong> — agents and bitcoin-aligned
+        customers checking out in sats.
       </p>
     </div>
     <div class="proof-card">
-      <div class="proof-eyebrow">Used in the agent ecosystem</div>
+      <div class="proof-eyebrow">In the agent ecosystem</div>
       <p>
-        MCP clients, autonomous agent frameworks, and developer-built
-        integrations across the Lightning Network are already using
-        the same producer API documented above. The
+        MCP clients, agent frameworks, and developer integrations
+        across the Lightning Network. Our
         <a href="https://github.com/refined-element/lightning-enable-mcp"
            target="_blank" rel="noopener noreferrer">MCP server</a>
         and
         <a href="https://github.com/refined-element/l402-ts"
            target="_blank" rel="noopener noreferrer">l402-requests</a>
-        clients are MIT-licensed and on every major package registry.
+        clients are MIT, published on every major registry.
       </p>
     </div>
   </div>
@@ -318,8 +315,7 @@ app.<span class="c-fn">get</span>(<span class="c-str">"/api/premium/data"</span>
       <div class="pricing-amount">$99<span class="pricing-period">/mo</span></div>
       <p class="pricing-who">
         For solo API builders, indie SaaS, and side-project APIs going
-        to production. Less than the value of a handful of agent calls
-        you'd otherwise have to block at the gate.
+        to production.
       </p>
       <ul class="pricing-features">
         <li><strong>Unlimited L402 endpoints</strong> — gate every route on every API you own</li>
@@ -345,8 +341,7 @@ app.<span class="c-fn">get</span>(<span class="c-str">"/api/premium/data"</span>
       <div class="pricing-amount">$299<span class="pricing-period">/mo</span></div>
       <p class="pricing-who">
         For teams and platforms with multiple APIs, customer SLAs, or
-        expected agent traffic spikes. Priority support means you have
-        someone to escalate to when an agent customer is blocked.
+        expected agent traffic spikes.
       </p>
       <ul class="pricing-features">
         <li>Everything in Individual</li>
@@ -379,8 +374,7 @@ app.<span class="c-fn">get</span>(<span class="c-str">"/api/premium/data"</span>
 <footer class="footer">
   <div class="footer-line">
     Lightning Enable is a product of
-    <a href="https://refinedelement.com" target="_blank" rel="noopener noreferrer">Refined Element, LLC</a>,
-    software consultancy, Orlando&nbsp;FL.
+    <a href="https://refinedelement.com" target="_blank" rel="noopener noreferrer">Refined Element, LLC</a>.
   </div>
   <div class="footer-links">
     <a href="https://api.lightningenable.com/dashboard" target="_blank" rel="noopener noreferrer">Dashboard</a>
