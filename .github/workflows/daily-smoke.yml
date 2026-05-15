@@ -1,0 +1,108 @@
+name: Daily Demo Smoke Test
+
+# Why this exists:
+#   The live demo at demo.lightningenable.com mints real Lightning
+#   invoices and pays them from a small CoinOS NWC wallet. Several
+#   things can take it down without our knowledge:
+#     - sats run out
+#     - NWC connection revoked or rate-limited
+#     - CoinOS relay temporarily unreachable from Vercel
+#     - LIGHTNING_ENABLE_API_KEY rotated without the Vercel env var
+#       being updated
+#     - the LE producer API returns 5xx on /api/l402/challenges
+#   When any of those happen, a prospect clicking "Run the agent"
+#   gets an error and never comes back.
+#
+# What this workflow does:
+#   Once per day, fires the actual end-to-end agent flow against
+#   the live production deploy at demo.lightningenable.com. Asserts
+#   the response is ok:true, paid a non-zero amount of sats, and
+#   that the LE backend verified the L402 token on the retry hop.
+#   If any of that fails, the job fails — GitHub emails repo
+#   admins by default on the first failure of a scheduled workflow.
+#
+# Why two attempts:
+#   NWC is occasionally flaky on relay round-trips (we've seen
+#   single-call timeouts during otherwise-healthy windows). A
+#   second attempt 60s later catches transient noise without
+#   masking persistent outages — if both attempts fail, something
+#   real is wrong.
+
+on:
+  schedule:
+    # 12:00 UTC daily — well within US business hours so the user
+    # sees the failure email at a reasonable time. Cron syntax is
+    # minute, hour, day-of-month, month, day-of-week.
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+    # Manual trigger button in the Actions UI for ad-hoc verification
+    # (e.g. after refilling the NWC wallet, or to sanity-check after
+    # a deploy).
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Run the agent against demo.lightningenable.com
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Exercise /api/run-agent end-to-end
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://demo.lightningenable.com/api/run-agent"
+          PAYLOAD='{"endpoint":"weather","city":"Miami"}'
+
+          for attempt in 1 2; do
+            echo "::group::Attempt ${attempt}/2"
+            response=$(curl -sS -X POST "$ENDPOINT" \
+              -H 'Content-Type: application/json' \
+              -d "$PAYLOAD" \
+              --max-time 60 \
+              -w '\nHTTP_STATUS:%{http_code}\n' || echo "CURL_FAILED")
+
+            # Split the http_code line off the body so we can validate both
+            http_status=$(printf '%s\n' "$response" | sed -n 's/^HTTP_STATUS://p' | tail -n1)
+            body=$(printf '%s\n' "$response" | sed '/^HTTP_STATUS:/d')
+
+            echo "HTTP status: ${http_status:-unknown}"
+            echo "Body:"
+            echo "$body" | jq . 2>/dev/null || echo "$body"
+            echo "::endgroup::"
+
+            # Validate the four signals that distinguish a healthy flow
+            # from a degraded one:
+            #   ok:true                — agent reported success
+            #   totalSats > 0          — real sats moved (not a stub)
+            #   final.l402.valid:true  — LE backend accepted the L402 token
+            #   HTTP 200               — Vercel didn't kill the function
+            ok=$(echo "$body" | jq -r '.ok // false' 2>/dev/null || echo "false")
+            totalSats=$(echo "$body" | jq -r '.totalSats // 0' 2>/dev/null || echo "0")
+            l402valid=$(echo "$body" | jq -r '.final.l402.valid // false' 2>/dev/null || echo "false")
+
+            if [ "${http_status:-0}" = "200" ] \
+               && [ "$ok" = "true" ] \
+               && [ "$totalSats" -gt 0 ] 2>/dev/null \
+               && [ "$l402valid" = "true" ]; then
+              echo "✅ Attempt ${attempt} passed: ok=true, totalSats=${totalSats}, l402.valid=true"
+              exit 0
+            fi
+
+            echo "❌ Attempt ${attempt} failed (http=${http_status:-?}, ok=${ok}, totalSats=${totalSats}, l402valid=${l402valid})"
+            # Surface the agent's own error string if there was one,
+            # so the failure email tells the user *why* (insufficient
+            # balance / NWC timeout / 502 from LE / etc.)
+            error=$(echo "$body" | jq -r '.error // ""' 2>/dev/null || true)
+            if [ -n "$error" ]; then
+              echo "Agent error: $error"
+            fi
+
+            if [ "$attempt" -lt 2 ]; then
+              echo "Sleeping 60s before retry..."
+              sleep 60
+            fi
+          done
+
+          echo "::error::Daily smoke test failed both attempts. Demo agent flow is not working — check the demo CoinOS wallet balance, NWC connection, and the LIGHTNING_ENABLE_API_KEY Vercel env var."
+          exit 1
