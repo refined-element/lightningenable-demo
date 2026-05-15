@@ -38,7 +38,15 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const city = (req.query.city || "Miami").toString().slice(0, 64);
+  // Accept "Miami, FL" / "Paris, France" / etc. by taking just the
+  // part before the first comma. Open-Meteo's geocoder matches the
+  // `name` field literally — "Miami, FL" returns zero results, but
+  // "Miami" returns Miami, FL (highest-pop) as the first match.
+  // We trade away precise state/country disambiguation (so
+  // "Miami, OH" still returns Miami, FL) for the much more common
+  // "user typed the city with a qualifier" path working at all.
+  const rawCity = (req.query.city || "Miami").toString().slice(0, 64);
+  const city = rawCity.split(",")[0].trim() || "Miami";
   const auth = req.headers.authorization || "";
   const parsed = parseL402(auth);
 
