@@ -168,19 +168,36 @@ export default async function handler(req, res) {
   // Defense-in-depth: the LNURL-pay callback URL is returned by the
   // metadata response we just received, so a compromised CoinOS (or
   // a MITM) could in principle hand back a callback pointing at an
-  // attacker-controlled host. Verify the callback's host matches the
-  // hardcoded LNURL domain (`coinos.io`) before following it. If
-  // CoinOS legitimately moves to a different domain in the future,
-  // this check fails closed and the operator updates the hardcoded
+  // attacker-controlled host. Verify BOTH the protocol and the host
+  // of the callback before following it:
+  //   - Protocol must be `https:` — a host-only check would accept
+  //     `http://coinos.io/...` (or `ftp://`, `javascript:`, etc.),
+  //     downgrading the subsequent invoice fetch to plaintext where
+  //     a network attacker could swap the bolt11 we receive.
+  //   - Host must match the hardcoded LIGHTNING_ADDRESS domain so
+  //     we never follow a same-origin-spoofing redirect to a third
+  //     party.
+  // If CoinOS legitimately moves to a different domain in the future,
+  // both checks fail closed and the operator updates the hardcoded
   // LIGHTNING_ADDRESS / domain string — preferable to silently
-  // following an unexpected redirect to a third party.
+  // accepting either a protocol downgrade or a host change.
   let callbackHost;
+  let callbackProtocol;
   try {
-    callbackHost = new URL(lnurlpMeta.callback).host;
+    const callbackParsed = new URL(lnurlpMeta.callback);
+    callbackHost = callbackParsed.host;
+    callbackProtocol = callbackParsed.protocol;
   } catch {
     return res.status(502).json({
       ok: false,
       error: `CoinOS LNURL-pay callback URL is malformed: "${String(lnurlpMeta.callback).slice(0, 100)}"`,
+      trace,
+    });
+  }
+  if (callbackProtocol !== "https:") {
+    return res.status(502).json({
+      ok: false,
+      error: `CoinOS LNURL-pay callback protocol "${callbackProtocol}" is not https. Refusing to follow a non-https callback.`,
       trace,
     });
   }
@@ -191,7 +208,7 @@ export default async function handler(req, res) {
       trace,
     });
   }
-  log("callback_host_verified", { host: callbackHost });
+  log("callback_host_verified", { host: callbackHost, protocol: callbackProtocol });
 
   // LNURL-pay expects amount in millisats. Validate it's within the
   // wallet's declared range to avoid the callback returning an error
@@ -332,10 +349,24 @@ export default async function handler(req, res) {
           trace,
         });
       }
+      // Defense-in-depth: scrub the OpenNode API key from any echoed
+      // text before returning. OpenNode's documented error shape is
+      // `{ message: "..." }` and we prefer that, but `text.slice(...)`
+      // is the fallback when the response isn't JSON. If OpenNode (or
+      // any intermediate proxy) ever echoed back the Authorization
+      // header value, returning it in our JSON response would surface
+      // the key to whatever called this endpoint. Replace any
+      // occurrence of the key in the chosen detail string with `[redacted]`
+      // before sending it back. Cheap, idempotent, never breaks
+      // legitimate error messages.
+      const rawDetails = parsed?.message ?? text.slice(0, 300);
+      const safeDetails = typeof rawDetails === "string"
+        ? rawDetails.split(openNodeKey).join("[redacted]")
+        : rawDetails;
       return res.status(502).json({
         ok: false,
         error: `OpenNode withdrawal failed: HTTP ${r.status}`,
-        details: parsed?.message || text.slice(0, 300),
+        details: safeDetails,
         trace,
       });
     }
@@ -410,18 +441,29 @@ function parseBolt11Sats(bolt11) {
   const amount = parseInt(m[2], 10);
   const mult = m[3];
   if (!Number.isFinite(amount) || amount <= 0) return null;
+  // Conversion phrasings deliberately match the header docstring's
+  // "÷ N sats" form so the two don't drift. (Earlier these were
+  // "amount × 0.0001 sats" / "amount × 0.1 sats", which is the same
+  // math but inverted phrasing and harder to reconcile against the
+  // header at a glance.)
   switch (mult) {
     case "m": return amount * 100_000;
     case "u": return amount * 100;
     case "n":
-      // nano: amount × 0.1 sats; must be divisible by 10 for whole sats
+      // nano: amount ÷ 10 sats; must be a multiple of 10 to yield whole sats
       if (amount % 10 !== 0) return null;
       return amount / 10;
     case "p":
-      // pico: amount × 0.0001 sats; must be divisible by 10_000
+      // pico: amount ÷ 10_000 sats; must be a multiple of 10_000 to yield whole sats
       if (amount % 10_000 !== 0) return null;
       return amount / 10_000;
     default:
       return null;
   }
 }
+
+// Named export for unit tests. `default` is the HTTP handler — Vercel
+// looks for it specifically — and we keep the parser private to the
+// runtime path by convention, but exposing it as a named export lets
+// the test file import it without duplicating the implementation.
+export { parseBolt11Sats };

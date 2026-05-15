@@ -15,12 +15,12 @@ name: Daily Demo Refill
 #   operator's CoinOS Lightning address.
 #
 # Why 11:30 UTC:
-#   30 min before the daily smoke test (12:00 UTC), so a fresh refill
-#   is in place when the smoke validates the agent flow. Order
-#   matters: smoke-after-refill means the smoke catches a refill
-#   failure indirectly (wallet didn't get topped up → smoke fails on
-#   INSUFFICIENT_BALANCE), in addition to this workflow surfacing
-#   the refill failure directly.
+#   37 min before the daily smoke test (12:07 UTC, in the sibling
+#   daily-smoke.yml workflow), so a fresh refill is in place when the
+#   smoke validates the agent flow. Order matters: smoke-after-refill
+#   means the smoke catches a refill failure indirectly (wallet didn't
+#   get topped up → smoke fails on INSUFFICIENT_BALANCE), in addition
+#   to this workflow surfacing the refill failure directly.
 #
 # Skipped vs failed:
 #   The endpoint returns ok:true with skipped:true when the OpenNode
@@ -32,10 +32,10 @@ name: Daily Demo Refill
 # Failure handling:
 #   Any other non-200 response, or a network error before HTTP, is
 #   treated as a real failure. The workflow opens (or comments on) a
-#   GitHub Issue via the `gh` CLI — same pattern as the smoke test
-#   workflow — so notifications reach the operator regardless of
-#   GitHub's default cron-failure email behavior. Most likely
-#   actually-alertable failure modes:
+#   GitHub Issue via the `gh` CLI — mirroring the sibling
+#   daily-smoke.yml workflow, so notifications reach the operator
+#   regardless of GitHub's default cron-failure email behavior.
+#   Most likely actually-alertable failure modes:
 #     - OPENNODE_WITHDRAWAL_API_KEY revoked or wrong scope
 #     - CoinOS LNURL-pay endpoint structurally broken (extended outage)
 #     - DEMO_REFILL_ADMIN_KEY mismatch between this workflow's secret
@@ -144,39 +144,87 @@ jobs:
           # consistently. The emoji is now in the body's first line for
           # the visual cue without confusing search.
           TITLE="Daily demo refill failed"
-          # `// empty` keeps jq from emitting the literal "null" when no
-          # match is found — otherwise [ -n "$existing" ] would treat
-          # "null" as truthy and try to comment on a non-existent issue.
-          existing=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+          # Dedupe lookup, two layers:
+          #   1. Server-side --search narrows the candidate set, but
+          #      it's tokenized Lucene — anything containing the title
+          #      words could match.
+          #   2. Client-side jq filters for an EXACT title match so we
+          #      never comment on an unrelated open issue that happens
+          #      to share the words.
+          # Then we distinguish "lookup succeeded, no match" (create)
+          # from "lookup failed" (skip — opening a new issue on every
+          # transient GitHub/search blip is exactly the duplicate-alert
+          # behavior this dedupe step exists to prevent).
+          lookup_err="$(mktemp)"
+          if existing_json=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "in:title \"$TITLE\"" --json number,title 2>"$lookup_err"); then
+            existing=$(printf '%s' "$existing_json" | jq -r --arg t "$TITLE" '[.[] | select(.title == $t)] | .[0].number // empty')
+            lookup_ok=1
+          else
+            echo "::warning::gh issue list failed; skipping dedupe to avoid masking failure. stderr: $(cat "$lookup_err")"
+            existing=""
+            lookup_ok=0
+          fi
+          rm -f "$lookup_err"
 
-          # Build the body as a bash multi-line string. Earlier this
-          # was a `cat <<EOF` heredoc, but the YAML `run: |` block
-          # indents every line — and `<<EOF` (no dash) requires the
-          # closing EOF marker at column 0 with no leading whitespace.
-          # A multi-line "..." literal sidesteps the issue entirely
-          # and reads more naturally inside the indented block.
+          # Build the Markdown body with NO leading indentation. The
+          # YAML `run: |` block strips a fixed amount of leading
+          # whitespace from every line — but ONLY because that's how
+          # the block scalar parser works. The bash string literal
+          # that follows is a different beast: it preserves every byte
+          # between its opening and closing quotes verbatim. If we
+          # indent the body lines to match the surrounding code (which
+          # reads naturally), every body line ends up with leading
+          # spaces, and Markdown renders 4+ leading spaces as a code
+          # block. Result: the GitHub issue is one big preformatted
+          # blob instead of a numbered list.
+          #
+          # Fix: keep the body lines unindented. Slight visual jolt
+          # against the surrounding indentation, but the output is
+          # correct Markdown.
           BODY="🚨 The daily demo refill (OpenNode → CoinOS) failed on $(date -u +%FT%TZ).
 
-          **Run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+**Run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 
-          Likely causes (in order of frequency):
-          1. OPENNODE_WITHDRAWAL_API_KEY revoked, rotated, or wrong scope
-          2. DEMO_REFILL_ADMIN_KEY mismatch (Vercel env var vs GitHub secret)
-          3. CoinOS LNURL-pay endpoint down (transient — try \`workflow_dispatch\` rerun in a few min)
-          4. Vercel function crashed — check Vercel logs for the demo-refill function
-          5. OpenNode API base URL misconfigured (allowlist rejects it)
+Likely causes (in order of frequency):
+1. OPENNODE_WITHDRAWAL_API_KEY revoked, rotated, or wrong scope
+2. DEMO_REFILL_ADMIN_KEY mismatch (Vercel env var vs GitHub secret)
+3. CoinOS LNURL-pay endpoint down (transient — try \`workflow_dispatch\` rerun in a few min)
+4. Vercel function crashed — check Vercel logs for the demo-refill function
+5. OpenNode API base URL misconfigured (allowlist rejects it)
 
-          Note: \"OpenNode balance too low\" is NOT in this list — that condition returns skipped:true and never fires this alert."
+Note: \"OpenNode balance too low\" is NOT in this list — that condition returns skipped:true and never fires this alert."
 
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --repo "${GITHUB_REPOSITORY}" --body "$BODY"
             # Apply the label on the existing issue too (idempotent).
-            # If the label doesn't exist, ignore the failure — admin
-            # can create the label later if they prefer.
-            gh issue edit "$existing" --repo "${GITHUB_REPOSITORY}" --add-label "refill-failure" 2>/dev/null || true
+            # If the label doesn't exist, capture the reason so the
+            # operator sees *why* — better than the previous silent
+            # `|| true` that hid both missing-label and any other
+            # failure.
+            label_edit_err="$(mktemp)"
+            if ! gh issue edit "$existing" --repo "${GITHUB_REPOSITORY}" --add-label "refill-failure" 2>"$label_edit_err"; then
+              echo "::warning::gh issue edit --add-label refill-failure failed on #$existing; not fatal. stderr: $(cat "$label_edit_err")"
+            fi
+            rm -f "$label_edit_err"
             echo "Commented on existing issue #$existing"
-          else
-            gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY" --label "refill-failure" 2>/dev/null \
-              || gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY"
+          elif [ "$lookup_ok" -eq 1 ]; then
+            # Lookup definitively said "no open issue with this title."
+            # Try with the refill-failure label; if --label fails (e.g.
+            # the label doesn't yet exist on the repo) capture the
+            # reason and retry without it so the operator still gets
+            # notified.
+            label_err="$(mktemp)"
+            if ! gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY" --label "refill-failure" 2>"$label_err"; then
+              echo "::warning::gh issue create with --label refill-failure failed; retrying without label. stderr: $(cat "$label_err")"
+              gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY"
+            fi
+            rm -f "$label_err"
             echo "Opened new issue"
+          else
+            # Lookup failed — we *don't* know whether an issue already
+            # exists. Skip creation; the workflow-failure visibility in
+            # the Actions UI is the fallback signal. Better than
+            # silently spamming new issues every day during a search
+            # outage.
+            echo "::warning::Skipped issue creation because dedupe lookup failed; rely on the Actions failure log for this run."
           fi
