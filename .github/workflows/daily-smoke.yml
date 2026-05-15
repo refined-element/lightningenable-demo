@@ -1,0 +1,423 @@
+name: Daily Demo Smoke Test
+
+# Why this exists:
+#   The live demo at demo.lightningenable.com mints real Lightning
+#   invoices and pays them from a small CoinOS NWC wallet. Several
+#   things can take it down without our knowledge:
+#     - sats run out
+#     - NWC connection revoked or rate-limited
+#     - CoinOS relay temporarily unreachable from Vercel
+#     - LIGHTNING_ENABLE_API_KEY rotated without the Vercel env var
+#       being updated
+#     - the LE producer API returns 5xx on /api/l402/challenges
+#   When any of those happen, a prospect clicking "Run the agent"
+#   gets an error and never comes back.
+#
+# What this workflow does:
+#   Once per day, fires the actual end-to-end agent flow against
+#   the live production deploy at demo.lightningenable.com. Asserts
+#   the response is ok:true, paid a non-zero amount of sats, and
+#   that the LE backend verified the L402 token on the retry hop.
+#   On failure, an explicit step opens (or comments on) a GitHub
+#   Issue — this is more reliable than relying on default cron-
+#   failure email behavior, which only notifies the workflow's
+#   actor based on per-account notification settings.
+#
+# Why two attempts:
+#   NWC is occasionally flaky on relay round-trips (we've seen
+#   single-call timeouts during otherwise-healthy windows). A
+#   second attempt 60s later catches transient noise without
+#   masking persistent outages — if both attempts fail, something
+#   real is wrong.
+
+on:
+  schedule:
+    # 12:07 UTC daily. The :07 offset avoids GitHub Actions' top-of-
+    # hour scheduling load spikes that can delay or drop runs at :00.
+    # Cron syntax is minute, hour, day-of-month, month, day-of-week.
+    - cron: '7 12 * * *'
+  workflow_dispatch:
+    # Manual trigger button in the Actions UI for ad-hoc verification
+    # (e.g. after refilling the NWC wallet, or to sanity-check after
+    # a deploy).
+
+# Serialize across triggers so a manual workflow_dispatch can't
+# race a scheduled run. Without this, two overlapping failures could
+# both see "no existing issue" and both open a new one (duplicate
+# alerts). `cancel-in-progress: false` keeps the in-flight run
+# alive and just queues the new trigger behind it.
+concurrency:
+  group: daily-smoke
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # `issues: write` required by the failure-notification step below
+  # so it can post/update a GitHub Issue. Issue creation reliably
+  # triggers notifications through every channel the operator has
+  # on (default repo-watch email, mobile push, etc.) — more reliable
+  # than the default cron-failure email which depends on per-account
+  # notification settings the operator may not have enabled.
+  issues: write
+
+jobs:
+  smoke:
+    name: Run the agent against demo.lightningenable.com
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Exercise /api/run-agent end-to-end
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://demo.lightningenable.com/api/run-agent"
+
+          # Alternate between the two production endpoints by day-of-
+          # year parity. The demo exposes `weather` AND `btc-price`
+          # paths; both go through the same L402 challenge/pay/access
+          # cycle but hit different upstream providers, so a failure
+          # confined to one upstream wouldn't alert if we only ever
+          # smoke-tested the other. Alternating covers both over time
+          # without doubling the daily wallet drain (each run still
+          # pays one invoice).
+          # Parity rule: even day-of-year → weather, odd → btc-price.
+          # Deterministic, no random state needed, and easy to read
+          # from the workflow log if an alert mentions which endpoint
+          # was being exercised.
+          DAY_OF_YEAR=$(date -u +%-j)
+          if [ $((DAY_OF_YEAR % 2)) -eq 0 ]; then
+            ENDPOINT_KIND="weather"
+            PAYLOAD='{"endpoint":"weather","city":"Miami"}'
+          else
+            ENDPOINT_KIND="btc-price"
+            PAYLOAD='{"endpoint":"btc-price"}'
+          fi
+          echo "Today's smoke target: ${ENDPOINT_KIND} (day-of-year=${DAY_OF_YEAR})"
+          echo "SMOKE_ENDPOINT_KIND=${ENDPOINT_KIND}" >> "$GITHUB_ENV"
+
+          for attempt in 1 2; do
+            echo "::group::Attempt ${attempt}/2 (${ENDPOINT_KIND})"
+            response=$(curl -sS -X POST "$ENDPOINT" \
+              -H 'Content-Type: application/json' \
+              -d "$PAYLOAD" \
+              --max-time 60 \
+              -w '\nHTTP_STATUS:%{http_code}\n' || echo "CURL_FAILED")
+
+            # Split the http_code line off the body so we can validate both
+            http_status=$(printf '%s\n' "$response" | sed -n 's/^HTTP_STATUS://p' | tail -n1)
+            body=$(printf '%s\n' "$response" | sed '/^HTTP_STATUS:/d')
+
+            echo "HTTP status: ${http_status:-unknown}"
+            echo "Body:"
+            echo "$body" | jq . 2>/dev/null || echo "$body"
+            echo "::endgroup::"
+
+            # Validate the signals that distinguish a healthy flow
+            # from a degraded one:
+            #   ok:true                — agent reported success
+            #   totalSats > 0          — real sats moved (not a stub)
+            #   final.l402.valid:true  — LE backend accepted the L402 token
+            #   final.error empty      — the upstream provider didn't
+            #     return an error AFTER the L402 was satisfied. Without
+            #     this check, an upstream weather/btc-price provider
+            #     outage would still pass smoke (the L402 hop is
+            #     healthy, the merchant returned HTTP 200, but the
+            #     payload field carries the provider's error and the
+            #     end user sees broken output). HTTP 200 + ok:true +
+            #     final.error means "we paid for and got back garbage."
+            #   HTTP 200               — Vercel didn't kill the function
+            ok=$(echo "$body" | jq -r '.ok // false' 2>/dev/null || echo "false")
+            totalSats=$(echo "$body" | jq -r '.totalSats // 0' 2>/dev/null || echo "0")
+            l402valid=$(echo "$body" | jq -r '.final.l402.valid // false' 2>/dev/null || echo "false")
+            finalError=$(echo "$body" | jq -r '.final.error // ""' 2>/dev/null || echo "")
+
+            # Endpoint-specific data assertion. The endpoints can
+            # return HTTP 200 + ok=true + l402.valid=true + no
+            # final.error but with degraded payload fields (weather
+            # returning `temperature_f: null` and `conditions:
+            # "unknown"` when its upstream provider is partially
+            # broken, btc-price returning `price: null` if the
+            # expected currency key is absent). The L402 hop is
+            # healthy in those cases but the user-facing data is
+            # garbage. Each endpoint declares its own non-null
+            # signal:
+            #   weather   → final.temperature_f must be a number
+            #   btc-price → final.price must be a number
+            # `jq ... | grep -E '^-?[0-9]+(\.[0-9]+)?$'` is a cheap
+            # "is this a numeric literal?" test that rejects null,
+            # missing, and non-numeric values.
+            case "$ENDPOINT_KIND" in
+              weather)
+                data_field="final.temperature_f"
+                dataVal=$(echo "$body" | jq -r '.final.temperature_f // "missing"' 2>/dev/null || echo "missing")
+                ;;
+              btc-price)
+                data_field="final.price"
+                dataVal=$(echo "$body" | jq -r '.final.price // "missing"' 2>/dev/null || echo "missing")
+                ;;
+              *)
+                # If a future endpoint kind doesn't have a data
+                # assertion configured, fail loud rather than silently
+                # falling back to a weaker success criterion.
+                data_field="(unconfigured for endpoint kind '$ENDPOINT_KIND')"
+                dataVal="missing"
+                ;;
+            esac
+            dataValid="false"
+            if echo "$dataVal" | grep -Eq '^-?[0-9]+(\.[0-9]+)?$'; then
+              dataValid="true"
+            fi
+
+            if [ "${http_status:-0}" = "200" ] \
+               && [ "$ok" = "true" ] \
+               && [ "$totalSats" -gt 0 ] 2>/dev/null \
+               && [ "$l402valid" = "true" ] \
+               && [ -z "$finalError" ] \
+               && [ "$dataValid" = "true" ]; then
+              echo "✅ Attempt ${attempt} passed (${ENDPOINT_KIND}): ok=true, totalSats=${totalSats}, l402.valid=true, no final.error, ${data_field}=${dataVal}"
+              exit 0
+            fi
+
+            echo "❌ Attempt ${attempt} failed (endpoint=${ENDPOINT_KIND}, http=${http_status:-?}, ok=${ok}, totalSats=${totalSats}, l402valid=${l402valid}, finalError='${finalError}', ${data_field}=${dataVal} dataValid=${dataValid})"
+            # Surface the agent's own error string so the failure issue
+            # body tells the user *why* (insufficient balance / NWC
+            # timeout / 502 from LE / etc.) Cascade through the most-
+            # specific signals first:
+            #   1. final.error — upstream provider failure AFTER the
+            #      L402 hop. This is the case the round-6 final.error
+            #      check was added to catch (HTTP 200 + ok:true but
+            #      the merchant returned a payload-level error from
+            #      weather/btc-price's upstream). Without surfacing it
+            #      here, the tracking issue would say "no agent
+            #      .error in body" and point the operator at the
+            #      wrong layer.
+            #   2. .error — agent-level error string (NWC timeout,
+            #      L402 verify rejection, etc.).
+            #   3. Synthesized placeholder if neither is present
+            #      (response wasn't JSON, or didn't include either
+            #      field — likely Vercel/network failure).
+            # Whichever fires, the value is exported to GITHUB_ENV on
+            # EVERY failed attempt so the notification step always
+            # reports THIS attempt's metadata, not stale data from an
+            # earlier attempt that happened to have a JSON body.
+            agent_error=$(echo "$body" | jq -r '.error // ""' 2>/dev/null || true)
+            # Cascade order, most-specific-first:
+            #
+            #   1. final.error — upstream provider explicitly told
+            #      the merchant endpoint something went wrong AFTER
+            #      L402 succeeded. Most actionable.
+            #   2. .error — agent-level error string. This MUST be
+            #      checked before the degraded-payload fallback,
+            #      because a real `{ok:false, error:"Agent wallet
+            #      failed..."}` response also has missing final.*
+            #      fields. If we checked degraded-payload first,
+            #      a real wallet/LE/Vercel failure would be reported
+            #      as "endpoint returned HTTP 200 with no usable data"
+            #      and the operator would never see the actual error
+            #      string. (Round-9 finding — original cascade had
+            #      degraded-payload above .error and got this wrong.)
+            #   3. Degraded payload — HTTP 200 + ok:true + L402 valid
+            #      + no final.error but the endpoint-specific data
+            #      field is null/missing. Catches partial upstream
+            #      breakage that doesn't surface as an explicit
+            #      error string.
+            #   4. Generic placeholder — nothing parsable.
+            if [ -n "$finalError" ]; then
+              error="upstream provider error after L402: ${finalError}"
+            elif [ -n "$agent_error" ]; then
+              error="$agent_error"
+            elif [ "$dataValid" != "true" ]; then
+              error="degraded payload: ${data_field}=${dataVal} (endpoint ${ENDPOINT_KIND} returned HTTP 200 with no usable data; check the merchant's upstream provider)"
+            else
+              error="(no agent .error or final.error in body; HTTP=${http_status:-?}, likely Vercel/network failure)"
+            fi
+            echo "Agent error: $error"
+            # Single-line, single-LF-safe truncate. `tr` strips both
+            # LF and CR — CR alone (or paired with LF) in an upstream
+            # error string would break the GITHUB_ENV file format
+            # (each entry must be on its own line; a stray CR inside
+            # the value can be interpreted as a record terminator by
+            # some parsers and would let an attacker inject another
+            # env var). Also strips control bytes < 0x20 except tab,
+            # belt-and-suspenders. `cut -c1-300` caps length so a
+            # giant error payload doesn't blow out the env file.
+            clean_error=$(printf '%s' "$error" | tr -d '\r\n' | tr -d '\000-\010\013-\037' | cut -c1-300)
+            echo "LAST_AGENT_ERROR=$clean_error" >> "$GITHUB_ENV"
+            echo "LAST_HTTP_STATUS=${http_status:-?}" >> "$GITHUB_ENV"
+            echo "LAST_ATTEMPT=${attempt}" >> "$GITHUB_ENV"
+
+            if [ "$attempt" -lt 2 ]; then
+              echo "Sleeping 60s before retry..."
+              sleep 60
+            fi
+          done
+
+          echo "::error::Daily smoke test failed both attempts. Demo agent flow is not working — check the demo CoinOS wallet balance, NWC connection, and the LIGHTNING_ENABLE_API_KEY Vercel env var."
+          exit 1
+
+      # Reliable failure notification. `if: failure()` runs this step
+      # only when one of the prior steps exited non-zero. Reuses an
+      # existing open issue when one exists so a multi-day outage
+      # gets ONE issue with comments instead of N spam-issues.
+      - name: Open / update tracking issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE="Daily demo smoke test failed"
+          # Find a still-open issue with this exact title.
+          #
+          # Why not --search "in:title \"$TITLE\"":
+          #   Issue search is backed by GitHub's full-text index,
+          #   which is (a) eventually consistent (a newly-opened
+          #   issue may not appear in search results for a few
+          #   seconds to minutes) and (b) only returns one page of
+          #   results by default. A queued manual workflow_dispatch
+          #   that runs immediately after a scheduled run can race
+          #   the index update and "succeed" with no match, opening
+          #   a duplicate even though the concurrency group already
+          #   serialized the runs. The simple `gh issue list`
+          #   (no --search) reads the open-issue table directly and
+          #   is strongly consistent.
+          # We pull up to --limit 200 open issues (default sort:
+          # newest first), then filter client-side with jq for an
+          # exact `.title == TITLE`. 200 is comfortably more than
+          # this repo will ever have for the daily-smoke surface;
+          # if you blow through that, the tracking-issue strategy
+          # itself has bigger problems.
+          # We also distinguish "lookup succeeded, no match" (create
+          # a fresh tracking issue) from "lookup itself failed"
+          # (still create the issue, but tag the body with a
+          # "dedupe lookup failed" marker so the operator knows the
+          # workflow may have just produced a duplicate). The
+          # rationale: a smoke-test failure whose alert is silenced
+          # because GitHub's API returned a transient error defeats
+          # the workflow's whole purpose. Notification always wins
+          # over deduplication purity — the operator can manually
+          # consolidate duplicates after the fact, but they can't
+          # un-miss an alert that was never sent.
+          lookup_err="$(mktemp)"
+          if existing_json=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 200 --json number,title 2>"$lookup_err"); then
+            existing=$(printf '%s' "$existing_json" | jq -r --arg t "$TITLE" '[.[] | select(.title == $t)] | .[0].number // empty')
+            lookup_ok=1
+          else
+            echo "::warning::gh issue list failed; will create issue without dedupe. stderr: $(cat "$lookup_err")"
+            existing=""
+            lookup_ok=0
+          fi
+          rm -f "$lookup_err"
+          AGENT_ERROR="${LAST_AGENT_ERROR:-(no agent .error field — likely HTTP-level failure or non-JSON response)}"
+          HTTP_STATUS="${LAST_HTTP_STATUS:-?}"
+          ATTEMPT="${LAST_ATTEMPT:-?}"
+          ENDPOINT_KIND="${SMOKE_ENDPOINT_KIND:-?}"
+          # Build the body via printf '%s\n'. The earlier heredoc
+          # form preserved the 10-space YAML indentation on every body
+          # line, which Markdown then rendered as one big code block.
+          # A flush-left bash literal would have terminated the YAML
+          # `run: |` block at parse time (broken workflow). printf with
+          # each line as a separate argument keeps the script lines at
+          # YAML indent while producing a flush-left body.
+          BODY=$(printf '%s\n' \
+            "🚨 The daily demo smoke test failed on $(date -u +%FT%TZ)." \
+            "" \
+            "**Endpoint exercised:** \`${ENDPOINT_KIND}\` (alternates daily by day-of-year parity — even=weather, odd=btc-price)" \
+            "**Run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            "" \
+            "**Last attempt:** ${ATTEMPT}/2, HTTP ${HTTP_STATUS}" \
+            "**Agent error:** ${AGENT_ERROR}" \
+            "" \
+            "Likely causes (in order of frequency):" \
+            "1. Demo CoinOS wallet drained — check whether a daily refill workflow has shipped in this repo (it tops up CoinOS from OpenNode); if present, look at its last run or trigger it manually from the Actions UI. Otherwise refill manually" \
+            "2. NWC connection revoked/timed out — re-issue the NWC URL from CoinOS" \
+            "3. LIGHTNING_ENABLE_API_KEY Vercel env var stale — rotate + update Vercel" \
+            "4. LE producer API returning 5xx — check api.lightningenable.com/health" \
+            "5. Vercel function crashed — check Vercel logs for the run-agent function" \
+            "6. Upstream provider for \`${ENDPOINT_KIND}\` returned an error after the L402 hop (\`final.error\` present in the response) — check Vercel logs for the merchant endpoint, and the upstream provider's status page if available" \
+            "7. Degraded payload — endpoint returned HTTP 200 with no \`final.error\`, but the expected data field (\`final.temperature_f\` for weather, \`final.price\` for btc-price) was null or missing. Same investigation path as #6 but the upstream may be returning a partial/stale response rather than an explicit error.")
+          if [ -n "$existing" ]; then
+            # Try to comment on the existing tracking issue. The
+            # existing issue could be locked, deleted between
+            # lookup and comment, or the comment API could have a
+            # transient failure — in any of those cases, under
+            # `set -euo pipefail` the step would abort and the
+            # operator would get no notification of the current
+            # smoke failure. Fall back to creating a fresh issue
+            # with a body marker explaining what happened, so the
+            # operator at least gets the alert. (They can manually
+            # close the old issue or re-open the locked one later.)
+            comment_err="$(mktemp)"
+            if gh issue comment "$existing" --repo "${GITHUB_REPOSITORY}" --body "$BODY" 2>"$comment_err"; then
+              echo "Commented on existing issue #$existing"
+            else
+              echo "::warning::gh issue comment on #$existing failed; falling back to a fresh issue so the operator still gets notified. stderr: $(cat "$comment_err")"
+              FALLBACK_NOTE=$(printf '%s\n' \
+                "" \
+                "---" \
+                "⚠️ **Comment-on-existing failed.** An open tracking issue #${existing} exists with this title, but \`gh issue comment\` could not post to it (it may be locked, deleted, or the API call failed transiently). This is a fresh issue with the same content so the alert wasn't lost. Please consolidate manually.")
+              BODY_WITH_NOTE=$(printf '%s\n%s\n' "$BODY" "$FALLBACK_NOTE")
+              fallback_err="$(mktemp)"
+              if ! gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY_WITH_NOTE" --label "smoke-failure" 2>"$fallback_err"; then
+                echo "::warning::Fallback gh issue create with label failed; retrying without label. stderr: $(cat "$fallback_err")"
+                if ! gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY_WITH_NOTE" 2>"$fallback_err"; then
+                  echo "::error::Comment failed AND fallback create attempts both failed. Smoke alert was NOT delivered. comment-err: $(cat "$comment_err") | create-err: $(cat "$fallback_err")"
+                  rm -f "$comment_err" "$fallback_err"
+                  exit 1
+                fi
+              fi
+              rm -f "$fallback_err"
+              echo "Opened fallback issue (comment on existing #$existing failed)"
+            fi
+            rm -f "$comment_err"
+          elif [ "$lookup_ok" -eq 1 ]; then
+            # Lookup definitively said "no open issue with this title."
+            # Try to create with the smoke-failure label; if --label
+            # fails (e.g. label doesn't yet exist on the repo) capture
+            # the reason and retry without it. The retry call ALSO
+            # captures stderr — under `set -euo pipefail`, if both
+            # attempts fail the step would abort silently and the
+            # operator would get no notification. Capture and emit
+            # `::error::` so the Actions run log carries the actual
+            # reason both creates failed.
+            label_err="$(mktemp)"
+            retry_err="$(mktemp)"
+            if ! gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY" --label "smoke-failure" 2>"$label_err"; then
+              echo "::warning::gh issue create with --label smoke-failure failed; retrying without label. stderr: $(cat "$label_err")"
+              if ! gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY" 2>"$retry_err"; then
+                echo "::error::Both labeled and unlabeled gh issue create attempts failed. Smoke alert was NOT delivered. labeled-err: $(cat "$label_err") | retry-err: $(cat "$retry_err")"
+                rm -f "$label_err" "$retry_err"
+                exit 1
+              fi
+            fi
+            rm -f "$label_err" "$retry_err"
+            echo "Opened new issue"
+          else
+            # Lookup failed — we *don't* know whether an issue already
+            # exists. Earlier this branch skipped creation entirely
+            # to avoid duplicate-issue spam during a search outage,
+            # but that traded the wrong way: a smoke-test failure
+            # whose alert is silenced because GitHub's search index
+            # is having a bad minute defeats the whole point of the
+            # workflow. Operator notice wins over deduplication
+            # purity. Create the issue anyway, tag the body with a
+            # marker so the operator knows dedupe didn't run, and
+            # they can manually consolidate if multiple alerts pile
+            # up during an extended outage. We still try the labeled
+            # create with a fallback to unlabeled.
+            DEDUPE_FAIL_NOTE=$(printf '%s\n' \
+              "" \
+              "---" \
+              "⚠️ **Dedupe lookup failed** when this issue was opened, so \`gh\` could not check whether a tracking issue for the same condition already exists. If you see another open issue with this title, manually consolidate them — the workflow chose notification over deduplication during the outage.")
+            BODY_WITH_NOTE=$(printf '%s\n%s\n' "$BODY" "$DEDUPE_FAIL_NOTE")
+            label_err="$(mktemp)"
+            retry_err="$(mktemp)"
+            if ! gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY_WITH_NOTE" --label "smoke-failure" 2>"$label_err"; then
+              echo "::warning::gh issue create with --label smoke-failure failed; retrying without label. stderr: $(cat "$label_err")"
+              if ! gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY_WITH_NOTE" 2>"$retry_err"; then
+                echo "::error::Both labeled and unlabeled gh issue create attempts failed (dedupe-failed branch). Smoke alert was NOT delivered. labeled-err: $(cat "$label_err") | retry-err: $(cat "$retry_err")"
+                rm -f "$label_err" "$retry_err"
+                exit 1
+              fi
+            fi
+            rm -f "$label_err" "$retry_err"
+            echo "Opened new issue (dedupe lookup skipped due to gh issue list failure)"
+          fi
