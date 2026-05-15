@@ -256,9 +256,20 @@
     // Backdrop click closes the dialog. The native <dialog> backdrop
     // is the dialog element itself when you click outside its content,
     // so target === lightbox identifies a backdrop click reliably.
+    //
+    // `closeLightbox()` mirrors the openLightbox fallback path —
+    // older browsers without <dialog>.close() get the `open` attribute
+    // removed manually instead. Without this, clicking the close
+    // button on legacy browsers would silently no-op.
+    function closeLightbox() {
+      if (typeof lightbox.close === "function") {
+        try { lightbox.close(); return; } catch { /* fall through */ }
+      }
+      lightbox.removeAttribute("open");
+    }
     lightbox.addEventListener("click", (e) => {
-      if (e.target === lightbox) lightbox.close();
+      if (e.target === lightbox) closeLightbox();
     });
-    lightboxClose?.addEventListener("click", () => lightbox.close());
+    lightboxClose?.addEventListener("click", closeLightbox);
   }
 })();
