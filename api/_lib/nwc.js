@@ -276,6 +276,185 @@ export async function payViaNwc(nwcUrl, bolt11, { timeoutMs = 25_000 } = {}) {
   });
 }
 
+/**
+ * Read the wallet's current balance via NIP-47 get_balance.
+ *
+ * Same NIP-04 over Nostr round-trip as payViaNwc — different RPC
+ * method, different result shape. Returns balance in sats (rounded
+ * down from msats since NWC reports millisatoshi precision but the
+ * demo doesn't need sub-sat granularity).
+ *
+ * Intentionally a peer function to payViaNwc rather than a refactor
+ * that shares orchestration. payViaNwc is the demo's load-bearing
+ * code path; touching its WebSocket / message-handling shape carries
+ * non-trivial risk of regressing the live agent flow. Duplicating
+ * ~80 LOC here is a known trade for stability.
+ *
+ * @param {string} nwcUrl  nostr+walletconnect://<walletPubkey>?relay=<wss>&secret=<hex>
+ * @param {{ timeoutMs?: number }} opts
+ * @returns {Promise<{ balanceSats: number, trace: object[] }>}
+ */
+export async function getBalance(nwcUrl, { timeoutMs = 10_000 } = {}) {
+  const trace = [];
+  const startedAt = Date.now();
+  const t = () => Date.now() - startedAt;
+  const record = (step, extras = {}) => trace.push({ t: t(), step, ...extras });
+
+  // ── Parse NWC URL ───────────────────────────────────────────────────
+  let url, walletPubkey, relay, secret;
+  try {
+    url = new URL(nwcUrl);
+    walletPubkey = (url.hostname || url.pathname.replace(/^\/\//, "")).toLowerCase();
+    relay = url.searchParams.get("relay") ?? "";
+    secret = (url.searchParams.get("secret") ?? "").toLowerCase();
+  } catch (e) {
+    throwWithTrace(`NWC URL malformed: ${e.message}`, trace);
+  }
+  if (!walletPubkey || !/^[0-9a-f]{64}$/.test(walletPubkey)) {
+    throwWithTrace("NWC URL missing or malformed wallet pubkey.", trace);
+  }
+  if (!relay) throwWithTrace("NWC URL missing relay query param.", trace);
+  if (!secret || !/^[0-9a-f]{64}$/.test(secret)) {
+    throwWithTrace("NWC URL missing or malformed secret.", trace);
+  }
+  record("nwc_url_parsed", { relay: hostOf(relay) });
+
+  // ── Derive client identity + shared secret ─────────────────────────
+  const secretBytes = hexToBytes(secret);
+  const myPubkey = bytesToHex(schnorr.getPublicKey(secretBytes));
+  const sharedPoint = secp256k1.getSharedSecret(secretBytes, "02" + walletPubkey);
+  const sharedX = sharedPoint.slice(1, 33);
+  record("identity_derived");
+
+  // ── Encrypt the get_balance RPC ────────────────────────────────────
+  const requestPayload = JSON.stringify({ method: "get_balance", params: {} });
+  const iv = crypto.getRandomValues(new Uint8Array(16));
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw", sharedX, { name: "AES-CBC", length: 256 }, false, ["encrypt"],
+  );
+  const ctBytes = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: "AES-CBC", iv },
+      cryptoKey,
+      new TextEncoder().encode(requestPayload),
+    ),
+  );
+  const content = `${b64(ctBytes)}?iv=${b64(iv)}`;
+  record("payload_encrypted_nip04");
+
+  // ── Sign event ─────────────────────────────────────────────────────
+  const createdAt = Math.floor(Date.now() / 1000);
+  const eventCore = {
+    kind: NWC_REQUEST_KIND,
+    pubkey: myPubkey,
+    created_at: createdAt,
+    tags: [["p", walletPubkey]],
+    content,
+  };
+  const serialized = JSON.stringify([
+    0, eventCore.pubkey, eventCore.created_at, eventCore.kind, eventCore.tags, eventCore.content,
+  ]);
+  const eventId = bytesToHex(sha256(new TextEncoder().encode(serialized)));
+  const sig = bytesToHex(schnorr.sign(hexToBytes(eventId), secretBytes));
+  const event = { ...eventCore, id: eventId, sig };
+  record("event_signed");
+
+  // ── Open WS, send, wait for reply ─────────────────────────────────
+  return await new Promise((resolve, reject) => {
+    const subId = bytesToHex(crypto.getRandomValues(new Uint8Array(8)));
+    let ws;
+    try {
+      ws = new WebSocket(relay);
+    } catch (e) {
+      reject(errWithTrace(`Could not open WebSocket to ${hostOf(relay)}: ${e.message}`, trace));
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      try { ws.close(); } catch {}
+      reject(errWithTrace(
+        `NWC get_balance timed out after ${timeoutMs}ms. ` +
+        `Last step: ${trace[trace.length - 1]?.step ?? "(none)"}.`,
+        trace,
+      ));
+    }, timeoutMs);
+
+    ws.on("open", () => {
+      record("ws_open");
+      ws.send(JSON.stringify([
+        "REQ", subId,
+        { kinds: [NWC_RESPONSE_KIND], "#e": [eventId], "#p": [myPubkey], since: createdAt - 10 },
+      ]));
+      ws.send(JSON.stringify(["EVENT", event]));
+      record("event_published");
+    });
+
+    ws.on("message", async (raw) => {
+      let msg;
+      try { msg = JSON.parse(raw.toString()); } catch { return; }
+      if (!Array.isArray(msg) || msg.length === 0) return;
+      const [type, ...rest] = msg;
+
+      if (type === "OK") {
+        const [okEventId, accepted, reason] = rest;
+        if (okEventId === eventId && accepted === false) {
+          clearTimeout(timer);
+          try { ws.close(); } catch {}
+          reject(errWithTrace(`Relay rejected get_balance event: ${reason || "(no reason)"}`, trace));
+        }
+        return;
+      }
+
+      if (type !== "EVENT") return;
+      const [evSubId, ev] = rest;
+      if (evSubId !== subId || ev?.kind !== NWC_RESPONSE_KIND) return;
+
+      try {
+        const [ctB64, ivB64Pair] = String(ev.content).split("?iv=");
+        const respCt = u8FromB64(ctB64);
+        const respIv = u8FromB64(ivB64Pair);
+        const decryptKey = await crypto.subtle.importKey(
+          "raw", sharedX, { name: "AES-CBC", length: 256 }, false, ["decrypt"],
+        );
+        const plain = new TextDecoder().decode(
+          await crypto.subtle.decrypt({ name: "AES-CBC", iv: respIv }, decryptKey, respCt),
+        );
+        const result = JSON.parse(plain);
+        record("response_decrypted", { hasError: !!result.error });
+
+        clearTimeout(timer);
+        try { ws.close(); } catch {}
+
+        if (result.error) {
+          reject(errWithTrace(
+            `Wallet returned NWC error ${result.error.code ?? "unknown"}: ${result.error.message ?? ""}`,
+            trace,
+          ));
+          return;
+        }
+        // NIP-47 reports balance in millisats; we want whole sats for
+        // the demo. Round DOWN — never overpromise available funds.
+        const balanceMsats = Number(result?.result?.balance);
+        if (!Number.isFinite(balanceMsats)) {
+          reject(errWithTrace("Wallet replied with no balance field.", trace));
+          return;
+        }
+        const balanceSats = Math.floor(balanceMsats / 1000);
+        resolve({ balanceSats, trace });
+      } catch (e) {
+        clearTimeout(timer);
+        try { ws.close(); } catch {}
+        reject(errWithTrace(`Failed to decrypt get_balance response: ${e.message}`, trace));
+      }
+    });
+
+    ws.on("error", (err) => {
+      clearTimeout(timer);
+      reject(errWithTrace(`WebSocket error on ${hostOf(relay)}: ${err?.message || err}`, trace));
+    });
+  });
+}
+
 // ── helpers ───────────────────────────────────────────────────────────
 
 function b64(u8) {

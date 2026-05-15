@@ -100,6 +100,11 @@
       </label>
     </div>
 
+    <!-- Demo-health banner. Filled in by app.js from /api/demo-health
+         on page load. Hidden by default so a healthy demo doesn't
+         render an empty box. -->
+    <div id="demo-health-banner" class="demo-health-banner hidden" role="status" aria-live="polite"></div>
+
     <button id="run-agent" class="cta cta-primary cta-block">⚡ Run the agent</button>
 
     <div id="trace" class="trace hidden" aria-live="polite"></div>

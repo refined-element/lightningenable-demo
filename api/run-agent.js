@@ -39,9 +39,107 @@ import { payViaNwc } from "./_lib/nwc.js";
 const SUPPORTED_ENDPOINTS = new Set(["weather", "btc-price"]);
 const MAX_SATS_PER_REQUEST = 25; // sanity ceiling — way above 1-sat demo prices
 
+// Lightweight abuse defense. Real damage from a drain attack is small
+// (sats go to LE merchant 5 = the operator's own account; cost is the
+// refill, not theft), but we don't want a `while true; do curl ...`
+// loop draining the CoinOS wallet faster than a daily refill replenishes.
+//
+// COOLDOWN_MS:  per-IP minimum gap between accepted clicks. Vercel
+//   serverless instances are warm-reused for many invocations from the
+//   same region, so a single in-memory Map catches the dumbest case
+//   (one IP spamming). Sophisticated attackers rotate IPs — but the
+//   real cap is the wallet-side CoinOS NWC spend limit; this is just
+//   speed-bump #1.
+//
+// ALLOWED_ORIGINS: only allow POST when the Referer is the demo site
+//   itself, OR is absent (curl/Postman/legitimate API testing). Bots
+//   that copy-paste the endpoint into a script usually include a
+//   bogus or missing Referer; bots driving a real browser context
+//   match. This is speed-bump #2.
+const COOLDOWN_MS = 30_000;
+const ALLOWED_ORIGINS = new Set([
+  "https://demo.lightningenable.com",
+  "https://lightningenable.com",
+  // Vercel previews — wildcards aren't trivially supported in a Set,
+  // so the check below also accepts *.vercel.app for the preview flow
+]);
+const ipLastSeen = new Map();
+
+function isAllowedOrigin(req) {
+  // Referer is the page from which the click came. For same-origin
+  // POSTs the browser sends it; curl/scripts often omit it. Empty
+  // Referer is allowed (the agent endpoint is intentionally
+  // CLI-callable for documentation purposes), but a Referer pointing
+  // at someone else's domain is suspicious.
+  const referer = req.headers["referer"] || req.headers["referrer"] || "";
+  if (!referer) return true;
+  try {
+    const origin = new URL(referer).origin;
+    if (ALLOWED_ORIGINS.has(origin)) return true;
+    // Vercel preview deploys live under *.vercel.app; allow them so
+    // PR previews can exercise the flow.
+    if (origin.endsWith(".vercel.app")) return true;
+    return false;
+  } catch {
+    // Malformed Referer — reject.
+    return false;
+  }
+}
+
+function clientIp(req) {
+  // Vercel surfaces the original visitor IP in x-forwarded-for. Trust
+  // the first comma-separated value; subsequent entries are upstream
+  // proxies.
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string" && xff.length > 0) {
+    return xff.split(",")[0].trim();
+  }
+  return req.socket?.remoteAddress || "unknown";
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
+
+  // Abuse defense — speed-bump #2 (Referer) before any work.
+  if (!isAllowedOrigin(req)) {
+    return res.status(403).json({
+      ok: false,
+      error: "Request origin not allowed for the live agent flow. " +
+             "If you're testing programmatically, send the request from " +
+             "the demo's domain or with no Referer header.",
+    });
+  }
+
+  // Abuse defense — speed-bump #1 (per-IP cooldown). Best-effort:
+  // Vercel warm-instance reuse means most spam from one IP hits the
+  // same function instance, so the Map sees it. Cold starts reset the
+  // map (acceptable — a determined attacker rotating IPs or waiting
+  // for cold instances is bounded by the CoinOS wallet's own
+  // daily-spend cap, which is the real defense).
+  const ip = clientIp(req);
+  const now = Date.now();
+  const last = ipLastSeen.get(ip);
+  if (last && now - last < COOLDOWN_MS) {
+    const wait = Math.ceil((COOLDOWN_MS - (now - last)) / 1000);
+    res.setHeader("Retry-After", String(wait));
+    return res.status(429).json({
+      ok: false,
+      error: `Demo cooldown active — please wait ${wait}s before running the agent again. ` +
+             "This is a per-visitor rate limit on the demo only; your real production " +
+             "L402 endpoints have no such limit.",
+    });
+  }
+  ipLastSeen.set(ip, now);
+  // Light prune so the Map doesn't grow unbounded over a long-warm
+  // instance lifetime. Only sweeps when the Map gets larger than 1k
+  // entries; sweep removes anything older than 10× the cooldown.
+  if (ipLastSeen.size > 1000) {
+    const cutoff = now - COOLDOWN_MS * 10;
+    for (const [k, v] of ipLastSeen) {
+      if (v < cutoff) ipLastSeen.delete(k);
+    }
   }
 
   // Parse body. Vercel auto-parses application/json into req.body.

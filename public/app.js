@@ -22,6 +22,52 @@
     "btc-price": document.getElementById("param-btc-price"),
   };
 
+  // ── Demo-health gate ───────────────────────────────────────────────
+  // Fetch /api/demo-health once at page load. If the demo's CoinOS
+  // wallet is empty, NWC is unresponsive, or the env var is misconfig,
+  // gate the button + show a banner so visitors don't waste a click
+  // on a flow we know will fail. The static code samples + explanation
+  // remain visible regardless — the product story doesn't depend on
+  // the live wallet being funded.
+  const elBanner = document.getElementById("demo-health-banner");
+  fetch("/api/demo-health", { headers: { Accept: "application/json" } })
+    .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+    .then((h) => {
+      if (!h) return;
+      // status: "ok" | "low" | "out" | "error"
+      if (h.status === "ok") return;
+
+      // Render the banner copy. "low" still lets the button work; "out"
+      // and "error" gray the button.
+      if (h.status === "low") {
+        elBanner.className = "demo-health-banner banner-low";
+        elBanner.innerHTML = `
+          <strong>Demo wallet running low.</strong>
+          <span>~${escapeHtml(String(h.balanceSats ?? "?"))} sat remaining — the agent flow may stop working soon while we refill.</span>
+        `;
+      } else if (h.status === "out") {
+        elBanner.className = "demo-health-banner banner-out";
+        elBanner.innerHTML = `
+          <strong>Demo wallet refill pending.</strong>
+          <span>The live agent flow is paused while we top up the demo's CoinOS wallet. The code samples below still work — this just gates the live-execution button.</span>
+        `;
+        elBtn.disabled = true;
+      } else {
+        // error / unknown — failure-closed: gate the button
+        elBanner.className = "demo-health-banner banner-error";
+        elBanner.innerHTML = `
+          <strong>Demo agent temporarily unavailable.</strong>
+          <span>We're working on it. The code samples and walkthrough below describe the same flow.</span>
+        `;
+        elBtn.disabled = true;
+      }
+      elBanner.classList.remove("hidden");
+    })
+    .catch(() => {
+      // /api/demo-health itself failed. Don't gate the button on this
+      // — health-check infra outage shouldn't take the demo down.
+    });
+
   // ── BTC rate (no hardcoded fallback) ────────────────────────────────
   // Fire-and-forget at page load. /api/btc-price races CoinGecko +
   // Coinbase + Kraken (mirrors LE's BitcoinPriceService); on total
@@ -101,7 +147,15 @@
 
     if (!res.ok || !data.ok) {
       pendingLine.remove();
-      appendTraceLine("⚠", `Agent failed: ${data?.error || "unknown error"}`, true);
+      // Friendly mapping for known failure modes. The agent endpoint
+      // returns raw NWC errors which read as "this product is broken"
+      // to a prospect. Map the common cases to copy that says "this
+      // demo's wallet is being refilled / hit a hiccup" — same idea
+      // as the health-check banner but for the race-condition case
+      // where health was OK on page load but the wallet drained
+      // between then and the click.
+      const friendly = mapAgentError(data?.error || "");
+      appendTraceLine("⚠", friendly, true);
       if (data?.details) appendTraceLine(" ", data.details, true);
       resetButton();
       return;
@@ -196,8 +250,45 @@
   }
 
   function resetButton() {
+    // Don't un-disable a button that was gated by the demo-health check
+    // at page load (banner already explains why). Only re-enable if
+    // the button got disabled by THIS click handler's loading state.
+    if (elBanner && !elBanner.classList.contains("hidden")
+        && (elBanner.classList.contains("banner-out") || elBanner.classList.contains("banner-error"))) {
+      elBtn.textContent = "⚡ Run the agent";
+      return;
+    }
     elBtn.disabled = false;
     elBtn.textContent = "⚡ Run the agent";
+  }
+
+  // Map raw agent-endpoint error strings to friendlier copy. The agent
+  // returns things like "Agent wallet failed to pay invoice (after
+  // 25164ms): Wallet returned NWC error INSUFFICIENT_BALANCE: ..."
+  // which makes the product look broken when it's really just the
+  // demo wallet's state. These mappings preserve enough signal for
+  // engineers (the raw error is still in network responses) while
+  // showing prospects a friendlier message.
+  function mapAgentError(raw) {
+    const s = String(raw);
+    if (/INSUFFICIENT_BALANCE/i.test(s) || /insufficient.+balance/i.test(s)) {
+      return "Demo wallet just ran out of sats — refill in progress. Try again in a few minutes.";
+    }
+    if (/RATE_LIMITED/i.test(s)) {
+      return "Demo wallet is being rate-limited. Try again in a minute.";
+    }
+    if (/NWC payment timed out/i.test(s) || /NWC get_balance timed out/i.test(s)) {
+      return "Demo wallet didn't respond in time — usually a relay hiccup. Try again in a few seconds.";
+    }
+    if (/Relay rejected/i.test(s) || /WebSocket error/i.test(s)) {
+      return "Demo wallet's Nostr relay had a connection issue. Try again in a few seconds.";
+    }
+    if (/Demo agent wallet is not configured/i.test(s)) {
+      return "Demo wallet is being reconfigured. The code samples below still describe the working flow.";
+    }
+    // Unknown — leave the raw signal in the trace below so support can
+    // diagnose, but front the line with friendlier framing.
+    return `Agent ran into an issue: ${s}`;
   }
 
   // ── Dashboard-screenshot lightbox ──────────────────────────────────

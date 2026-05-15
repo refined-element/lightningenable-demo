@@ -204,6 +204,36 @@ a:hover { text-decoration: underline; }
   margin-top: 1.5rem;
 }
 
+/* ─── Demo-health banner ──────────────────────────── */
+/* Shown above the agent button when /api/demo-health reports the
+   CoinOS wallet is low, out of funds, or unresponsive. The button
+   itself is gated separately in app.js; this is the explanation. */
+.demo-health-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.9rem 1.1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  font-size: 0.9rem;
+  margin-top: 1rem;
+}
+.demo-health-banner strong { color: var(--white); }
+.demo-health-banner span { color: var(--dim); }
+.demo-health-banner.banner-low {
+  border-color: var(--bolt);
+  background: var(--bolt-soft);
+}
+.demo-health-banner.banner-out {
+  border-color: var(--red);
+  background: rgba(239, 68, 68, 0.08);
+}
+.demo-health-banner.banner-error {
+  border-color: var(--border-strong);
+  background: #161616;
+}
+
 /* ─── Section scaffolding ──────────────────────────────── */
 .section {
   padding: 6rem var(--gutter);
