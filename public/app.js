@@ -199,4 +199,32 @@
     elBtn.disabled = false;
     elBtn.textContent = "⚡ Run the agent";
   }
+
+  // ── Dashboard-screenshot lightbox ──────────────────────────────────
+  // Clicking any dashboard-card screenshot opens it full-size in the
+  // native <dialog> element added at the bottom of index.html. Uses
+  // showModal() so Esc-to-close is free, plus a tiny backdrop-click
+  // handler since <dialog> doesn't close on backdrop click natively.
+  // ImageElement.src is set right before each open, so the same
+  // <dialog> instance serves all four cards without per-card markup.
+  const lightbox = document.getElementById("screenshot-lightbox");
+  if (lightbox) {
+    const lightboxImg = lightbox.querySelector(".lightbox-img");
+    const lightboxClose = lightbox.querySelector(".lightbox-close");
+    document.querySelectorAll(".dashboard-card .dashboard-img").forEach((img) => {
+      img.addEventListener("click", () => {
+        if (!lightboxImg) return;
+        lightboxImg.src = img.src;
+        lightboxImg.alt = img.alt;
+        lightbox.showModal();
+      });
+    });
+    // Backdrop click closes the dialog. The native <dialog> backdrop
+    // is the dialog element itself when you click outside its content,
+    // so target === lightbox identifies a backdrop click reliably.
+    lightbox.addEventListener("click", (e) => {
+      if (e.target === lightbox) lightbox.close();
+    });
+    lightboxClose?.addEventListener("click", () => lightbox.close());
+  }
 })();

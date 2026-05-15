@@ -514,6 +514,66 @@ pre.code {
   color: var(--white);
   margin-bottom: 0.3rem;
 }
+/* Click affordance on the card image — both pointer cursor and a
+   tiny hover lift on the whole card. The lightbox is opened by a
+   click handler in app.js. */
+.dashboard-card .dashboard-img {
+  cursor: zoom-in;
+  transition: filter 0.2s;
+}
+.dashboard-card:hover .dashboard-img {
+  filter: brightness(1.08);
+}
+
+/* ─── Screenshot lightbox ─────────────────────────── */
+/* Uses the native <dialog> element so Esc-to-close + focus trap +
+   backdrop are free. We strip the default chrome and supply our own.
+   95vw / 95vh caps keep the image away from the viewport edges and
+   leave room for a visible close button. */
+.lightbox {
+  border: none;
+  background: transparent;
+  padding: 0;
+  max-width: 95vw;
+  max-height: 95vh;
+  overflow: visible;
+}
+.lightbox::backdrop {
+  background: rgba(0, 0, 0, 0.82);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.lightbox-img {
+  display: block;
+  max-width: 100%;
+  max-height: 95vh;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 30px 60px -20px rgba(0, 0, 0, 0.7);
+}
+.lightbox-close {
+  position: absolute;
+  top: -14px;
+  right: -14px;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  color: var(--white);
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+  transition: background 0.15s, border-color 0.15s;
+}
+.lightbox-close:hover {
+  background: var(--bolt);
+  border-color: var(--bolt);
+  color: var(--bg);
+}
 
 /* ─── Pricing ──────────────────────────────────────── */
 .pricing-grid {

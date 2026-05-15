@@ -313,6 +313,15 @@ app.<span class="c-fn">get</span>(<span class="c-str">"/api/premium/data"</span>
   </div>
 </footer>
 
+<!-- Click-to-zoom lightbox for the dashboard screenshots above. Uses
+     the native <dialog> element — no library, no JS framework. Source
+     img is set at click time so a single dialog instance serves all
+     four cards. -->
+<dialog id="screenshot-lightbox" class="lightbox" aria-label="Screenshot detail">
+  <button type="button" class="lightbox-close" aria-label="Close lightbox">&times;</button>
+  <img class="lightbox-img" alt="" />
+</dialog>
+
 <script src="app.js" defer></script>
 </body>
 </html>
