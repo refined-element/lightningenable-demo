@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Lightning Enable — Add Lightning revenue to your API</title>
-<meta name="description" content="Monetize any HTTP API with per-request Lightning payments. AI agents pay in sats. Drop in three lines, no per-transaction fees." />
-<meta property="og:title" content="Lightning Enable — Add Lightning revenue to your API" />
-<meta property="og:description" content="Drop three lines into your API and let AI agents pay you per request in Lightning. Real demo, real Bitcoin, ≈ 1 sat per request." />
+<title>Lightning Enable — Monetize your API for AI agents</title>
+<meta name="description" content="Software paying software, per request, over Lightning. Let AI agents buy from your API in sats — alongside your existing subscriptions, rate limits, and API keys." />
+<meta property="og:title" content="Lightning Enable — Monetize your API for AI agents" />
+<meta property="og:description" content="Infrastructure for agentic commerce over Lightning. Drop into your existing API and let agents pay per request. Flat monthly fee, no per-transaction cut." />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://demo.lightningenable.com" />
 <meta name="twitter:card" content="summary_large_image" />
@@ -34,17 +34,17 @@
 <section class="hero">
   <div class="bolt-mark" aria-hidden="true">⚡</div>
   <h1 class="hero-title">
-    Add <span class="highlight">Lightning revenue</span><br />
-    to your API.
+    Monetize your API for<br />
+    <span class="highlight">AI agents</span>.
   </h1>
   <p class="hero-sub">
-    Drop three lines of code. Let AI agents pay you per request in Bitcoin
-    over the Lightning Network. No new contracts, no per-transaction fees,
-    no replacing what you already charge.
+    Software paying software, per request, over Lightning. Drop into
+    your existing API — your subscriptions, rate limits, and API keys
+    stay exactly as they are.
   </p>
   <div class="hero-ctas">
     <a href="#try" class="cta cta-primary">⚡ Run the agent</a>
-    <a href="#build" class="cta cta-ghost">View the code</a>
+    <a href="https://api.lightningenable.com/Checkout?tier=individual" class="cta cta-ghost" target="_blank" rel="noopener noreferrer">Start free trial</a>
   </div>
   <div class="hero-meta">
     Real Lightning · 1 sat per call · ~1 second settlement
@@ -55,11 +55,11 @@
 <section id="try" class="section">
   <h2 class="section-title">Watch an agent buy from this API.</h2>
   <p class="section-lede">
-    The button below triggers an autonomous agent on our server. It calls the
-    paid endpoint you choose, pays the resulting Lightning invoice from a
-    pre-funded wallet, and retries with the L402 credential — exactly what
-    your customers' agents will do against <em>your</em> API once you
-    integrate.
+    Click the button. An autonomous agent on our server hits a paid
+    endpoint, gets a 402 with a Lightning invoice, pays it from a
+    pre-funded wallet, and retries with proof of payment — all in under
+    two seconds. <strong>This is exactly what your customers' agents will
+    do against your API once you integrate.</strong>
   </p>
 
   <div class="try-card">
@@ -110,7 +110,46 @@
 
     <div id="trace" class="trace hidden" aria-live="polite"></div>
     <pre id="result" class="result hidden" aria-live="polite"></pre>
+    <!-- Plain-English interpretation of a successful run. Populated
+         by app.js after a green response so the JSON above doesn't
+         leave a non-developer visitor confused about what happened. -->
+    <p id="run-summary" class="run-summary hidden" aria-live="polite"></p>
   </div>
+</section>
+
+<!-- ─── L402 explainer ─── -->
+<section class="section section-callout">
+  <h2 class="callout-eyebrow">What you just saw, in one sentence</h2>
+  <p class="callout-text">
+    <strong>L402 turns payment into authorization.</strong> The agent
+    paid the invoice, retried the same request with the preimage as
+    proof, and your API checked the proof and served the response.
+    No accounts, no sign-up, no card on file — just a tiny payment,
+    a cryptographic receipt, and the response.
+  </p>
+</section>
+
+<!-- ─── Why now ─── -->
+<section class="section section-now">
+  <h2 class="section-title">AI agents are starting to buy.</h2>
+  <p class="section-lede">
+    They book travel. They search the web. They run workflows. They call
+    APIs. They pay for tools.
+  </p>
+  <p class="section-lede">
+    But they can't use Stripe. Agents don't have credit cards, billing
+    addresses, or fraud histories — so today, agent traffic gets eaten
+    by the API provider or blocked at the gate.
+  </p>
+  <p class="section-lede">
+    Lightning per-request payments fit. The agent hits your endpoint,
+    gets a 402, pays in under a second, and retries with proof of
+    payment. You get paid. The agent gets in.
+  </p>
+  <p class="section-lede">
+    A new buyer class is forming. The cost of ignoring it grows as fast
+    as the agents do.
+  </p>
 </section>
 
 <!-- ─── Why ─── -->
@@ -123,10 +162,10 @@
       Lightning per-request runs alongside on the same endpoints.
     </li>
     <li>
-      <strong>Earn from buyers that don't have credit cards.</strong>
-      AI agents, MCP clients, autonomous workflows — they can't use Stripe,
-      but they can pay sats. Capture revenue from a market that didn't
-      exist three years ago.
+      <strong>Reach buyers your card processor can't.</strong>
+      AI agents, MCP clients, and autonomous workflows can't sign up for
+      Stripe — no name, no card, no fraud identity. They can pay sats.
+      Capture revenue from a buyer class that didn't exist three years ago.
     </li>
     <li>
       <strong>Settles in seconds. Final.</strong>
@@ -209,28 +248,6 @@ app.<span class="c-fn">get</span>(<span class="c-str">"/api/premium/data"</span>
       </figcaption>
     </figure>
     <figure class="dashboard-card">
-      <img src="dashboard/proxies.png"
-           alt="Lightning Enable proxies list — every API you've monetized with its default price, status, and request count"
-           class="dashboard-img"
-           loading="lazy"
-           width="1200" height="1023" />
-      <figcaption>
-        <strong>Every API in one place.</strong>
-        List, search, and manage everything you've monetized — at any scale.
-      </figcaption>
-    </figure>
-    <figure class="dashboard-card">
-      <img src="dashboard/overview.png"
-           alt="Lightning Enable proxy overview tab — proxy information, statistics, quick actions, and a copy-paste integration snippet"
-           class="dashboard-img"
-           loading="lazy"
-           width="1200" height="1023" />
-      <figcaption>
-        <strong>Per-API ops.</strong>
-        Stats, integration URL, and lifecycle controls for every endpoint.
-      </figcaption>
-    </figure>
-    <figure class="dashboard-card">
       <img src="dashboard/pricing.png"
            alt="Lightning Enable proxy pricing tab — every endpoint with its individual sat price, manifest visibility, and L402 status"
            class="dashboard-img"
@@ -244,24 +261,72 @@ app.<span class="c-fn">get</span>(<span class="c-str">"/api/premium/data"</span>
   </div>
 </section>
 
+<!-- ─── Trust / proof ─── -->
+<section class="section section-proof">
+  <h2 class="section-title">Live infrastructure, used today.</h2>
+  <div class="proof-grid">
+    <div class="proof-card">
+      <div class="proof-eyebrow">Real Lightning, right above this card</div>
+      <p>
+        The demo at the top of this page isn't a mock. It's a real
+        autonomous agent settling real Bitcoin over Lightning against
+        this site — same producer API your customers' agents will hit
+        when you integrate. Click "Run the agent" again to watch a
+        fresh invoice settle in under two seconds.
+      </p>
+    </div>
+    <div class="proof-card">
+      <div class="proof-eyebrow">Also for ecommerce</div>
+      <p>
+        Lightning Enable powers L402 stores on
+        <strong>Shopify</strong> and <strong>Kentico</strong> — agent
+        shoppers and bitcoin-aligned customers buy real products with
+        sats. Live merchants include
+        <strong>Great Ghee</strong> and
+        <strong>Salt of the Earth</strong>.
+      </p>
+    </div>
+    <div class="proof-card">
+      <div class="proof-eyebrow">Used in the agent ecosystem</div>
+      <p>
+        MCP clients, autonomous agent frameworks, and developer-built
+        integrations across the Lightning Network are already using
+        the same producer API documented above. The
+        <a href="https://github.com/refined-element/lightning-enable-mcp"
+           target="_blank" rel="noopener noreferrer">MCP server</a>
+        and
+        <a href="https://github.com/refined-element/l402-ts"
+           target="_blank" rel="noopener noreferrer">l402-requests</a>
+        clients are MIT-licensed and on every major package registry.
+      </p>
+    </div>
+  </div>
+</section>
+
 <!-- ─── Pricing ─── -->
 <section id="pricing" class="section">
   <h2 class="section-title">Pricing.</h2>
   <p class="section-lede">
-    Lightning Enable is a flat-rate subscription. You keep 100% of the sats
-    your customers pay — we charge a monthly fee, not a percentage.
+    Subscription, not a percentage. One million 1-sat requests earn you
+    1,000,000 sats — we don't touch any of them. Your settlement
+    provider (Strike or OpenNode) custodies every payment.
   </p>
 
   <div class="pricing-grid">
     <div class="pricing-card">
       <div class="pricing-name">Agentic Commerce — Individual</div>
       <div class="pricing-amount">$99<span class="pricing-period">/mo</span></div>
+      <p class="pricing-who">
+        For solo API builders, indie SaaS, and side-project APIs going
+        to production. Less than the value of a handful of agent calls
+        you'd otherwise have to block at the gate.
+      </p>
       <ul class="pricing-features">
-        <li>Unlimited L402 endpoints</li>
+        <li><strong>Unlimited L402 endpoints</strong> — gate every route on every API you own</li>
         <li>Strike <em>or</em> OpenNode as settlement provider</li>
-        <li>Per-endpoint pricing</li>
-        <li>Live dashboard + payment feed</li>
-        <li>30-day free trial</li>
+        <li>Per-endpoint pricing — different routes can charge different rates</li>
+        <li>Live dashboard + per-request payment feed</li>
+        <li>30-day free trial — card required, nothing charged until day 31</li>
       </ul>
       <div class="pricing-actions">
         <a class="cta cta-primary"
@@ -278,12 +343,17 @@ app.<span class="c-fn">get</span>(<span class="c-str">"/api/premium/data"</span>
     <div class="pricing-card pricing-card-business">
       <div class="pricing-name">Agentic Commerce — Business</div>
       <div class="pricing-amount">$299<span class="pricing-period">/mo</span></div>
+      <p class="pricing-who">
+        For teams and platforms with multiple APIs, customer SLAs, or
+        expected agent traffic spikes. Priority support means you have
+        someone to escalate to when an agent customer is blocked.
+      </p>
       <ul class="pricing-features">
         <li>Everything in Individual</li>
-        <li>Priority support</li>
-        <li>Higher rate limits</li>
-        <li>Multi-currency settlement</li>
-        <li>30-day free trial</li>
+        <li><strong>Priority support</strong> — direct response from the team that built this</li>
+        <li><strong>Higher rate limits</strong> — handles bursts when agent traffic concentrates</li>
+        <li>Multi-currency settlement — USD, EUR, GBP, AUD via Strike, not BTC-only</li>
+        <li>30-day free trial — card required, nothing charged until day 31</li>
       </ul>
       <div class="pricing-actions">
         <a class="cta cta-primary"

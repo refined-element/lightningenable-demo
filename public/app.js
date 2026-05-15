@@ -14,6 +14,7 @@
   const elBtn = document.getElementById("run-agent");
   const elTrace = document.getElementById("trace");
   const elResult = document.getElementById("result");
+  const elSummary = document.getElementById("run-summary");
   const elCity = document.getElementById("input-city");
   const elCurrency = document.getElementById("input-currency");
   const radios = document.querySelectorAll('input[name="endpoint"]');
@@ -137,6 +138,10 @@
     elTrace.classList.remove("hidden");
     elResult.classList.add("hidden");
     elResult.textContent = "";
+    if (elSummary) {
+      elSummary.classList.add("hidden");
+      elSummary.innerHTML = "";
+    }
 
     const pendingLine = appendTraceLine("·· ms", "Sending request to /api/run-agent…");
 
@@ -230,6 +235,25 @@
     // Render the final response object
     elResult.textContent = JSON.stringify(data.final, null, 2);
     elResult.classList.remove("hidden");
+
+    // Plain-English interpretation of what just happened, for the
+    // visitor who didn't read the JSON. Only renders on a clean
+    // success (ok=true, totalSats>0, final.l402.valid=true). The
+    // strings here use innerHTML to bold a couple keywords; the
+    // dynamic values (sats, ms) are passed through escapeHtml so a
+    // malformed backend response can't inject markup.
+    if (elSummary && data.ok && data.totalSats > 0 && data?.final?.l402?.valid) {
+      const sats = escapeHtml(String(data.totalSats));
+      const ms = data.totalMs != null ? escapeHtml(String(data.totalMs)) : null;
+      const endpointKind = escapeHtml(String(data?.final?.l402?.resource || data?.endpoint || "the paid endpoint"));
+      const timing = ms ? ` in <strong>${ms} ms</strong>` : "";
+      elSummary.innerHTML =
+        `✓ The agent paid <strong>${sats} sat${sats === "1" ? "" : "s"}</strong>${timing}, ` +
+        `got the response, and your provider account would now be ${sats} sat${sats === "1" ? "" : "s"} ` +
+        `heavier — with zero per-transaction fees taken out. ` +
+        `This is the same flow your customers' agents would run against your API at <code>${endpointKind}</code>.`;
+      elSummary.classList.remove("hidden");
+    }
 
     resetButton();
   });
