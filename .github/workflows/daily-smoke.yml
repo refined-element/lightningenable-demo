@@ -151,23 +151,37 @@ jobs:
         run: |
           set -euo pipefail
           TITLE="Daily demo smoke test failed"
-          # `// empty` makes jq emit an empty string instead of the
-          # literal "null" when no open issue matches the search —
-          # without this, [ -n "$existing" ] below would be true on
-          # the string "null" and try to comment on a non-existent
-          # issue. The leading-emoji-stripped title also dodges
-          # GitHub's issue-search tokenizer being finicky with
-          # non-ASCII characters; the body still mentions the
-          # alert visually.
-          existing=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+          # Find a still-open issue with this exact title. Two layers:
+          #   1. `--search 'in:title "TITLE"'` narrows the server-side
+          #      query but it's a tokenized Lucene match, not exact —
+          #      anything containing those tokens could match.
+          #   2. We then filter client-side with jq for an exact
+          #      `.title == TITLE` so we never comment on an unrelated
+          #      open issue that happens to contain the same words.
+          # Separately, we must distinguish "lookup succeeded, no
+          # match" (proceed to create) from "lookup itself failed"
+          # (back off — opening a new issue on every transient
+          # GitHub/search blip is exactly the duplicate-alert
+          # behavior this section is supposed to prevent).
+          lookup_err="$(mktemp)"
+          if existing_json=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "in:title \"$TITLE\"" --json number,title 2>"$lookup_err"); then
+            existing=$(printf '%s' "$existing_json" | jq -r --arg t "$TITLE" '[.[] | select(.title == $t)] | .[0].number // empty')
+            lookup_ok=1
+          else
+            echo "::warning::gh issue list failed; skipping dedupe to avoid masking failure. stderr: $(cat "$lookup_err")"
+            existing=""
+            lookup_ok=0
+          fi
+          rm -f "$lookup_err"
           AGENT_ERROR="${LAST_AGENT_ERROR:-(no agent .error field — likely HTTP-level failure or non-JSON response)}"
           HTTP_STATUS="${LAST_HTTP_STATUS:-?}"
+          ATTEMPT="${LAST_ATTEMPT:-?}"
           BODY=$(cat <<EOF
           🚨 The daily demo smoke test failed on $(date -u +%FT%TZ).
 
           **Run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 
-          **Last attempt:** HTTP ${HTTP_STATUS}
+          **Last attempt:** ${ATTEMPT}/2, HTTP ${HTTP_STATUS}
           **Agent error:** ${AGENT_ERROR}
 
           Likely causes (in order of frequency):
@@ -181,11 +195,24 @@ jobs:
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --repo "${GITHUB_REPOSITORY}" --body "$BODY"
             echo "Commented on existing issue #$existing"
-          else
-            # Try with the smoke-failure label first; fall back to no
-            # label if the label doesn't exist (label creation isn't
-            # in scope here; admins can create it if they prefer).
-            gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY" --label "smoke-failure" 2>/dev/null \
-              || gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY"
+          elif [ "$lookup_ok" -eq 1 ]; then
+            # Lookup definitively said "no open issue with this title."
+            # Try to create with the smoke-failure label; if --label
+            # fails (e.g. label doesn't yet exist on the repo) capture
+            # the reason and retry without it so the operator still
+            # gets notified.
+            label_err="$(mktemp)"
+            if ! gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY" --label "smoke-failure" 2>"$label_err"; then
+              echo "::warning::gh issue create with --label smoke-failure failed; retrying without label. stderr: $(cat "$label_err")"
+              gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY"
+            fi
+            rm -f "$label_err"
             echo "Opened new issue"
+          else
+            # Lookup failed — we *don't* know whether an issue already
+            # exists. Skip creation; the workflow-failure visibility in
+            # the Actions UI is the fallback signal. Better than
+            # silently spamming new issues every day during a search
+            # outage.
+            echo "::warning::Skipped issue creation because dedupe lookup failed; rely on the Actions failure log for this run."
           fi
