@@ -176,22 +176,27 @@ jobs:
           AGENT_ERROR="${LAST_AGENT_ERROR:-(no agent .error field — likely HTTP-level failure or non-JSON response)}"
           HTTP_STATUS="${LAST_HTTP_STATUS:-?}"
           ATTEMPT="${LAST_ATTEMPT:-?}"
-          BODY=$(cat <<EOF
-          🚨 The daily demo smoke test failed on $(date -u +%FT%TZ).
-
-          **Run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-
-          **Last attempt:** ${ATTEMPT}/2, HTTP ${HTTP_STATUS}
-          **Agent error:** ${AGENT_ERROR}
-
-          Likely causes (in order of frequency):
-          1. Demo CoinOS wallet drained — refill it or wait for the daily refill cron
-          2. NWC connection revoked/timed out — re-issue the NWC URL from CoinOS
-          3. LIGHTNING_ENABLE_API_KEY Vercel env var stale — rotate + update Vercel
-          4. LE producer API returning 5xx — check api.lightningenable.com/health
-          5. Vercel function crashed — check Vercel logs for the run-agent function
-          EOF
-          )
+          # Build the body via printf '%s\n'. The earlier heredoc
+          # form preserved the 10-space YAML indentation on every body
+          # line, which Markdown then rendered as one big code block.
+          # A flush-left bash literal would have terminated the YAML
+          # `run: |` block at parse time (broken workflow). printf with
+          # each line as a separate argument keeps the script lines at
+          # YAML indent while producing a flush-left body.
+          BODY=$(printf '%s\n' \
+            "🚨 The daily demo smoke test failed on $(date -u +%FT%TZ)." \
+            "" \
+            "**Run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            "" \
+            "**Last attempt:** ${ATTEMPT}/2, HTTP ${HTTP_STATUS}" \
+            "**Agent error:** ${AGENT_ERROR}" \
+            "" \
+            "Likely causes (in order of frequency):" \
+            "1. Demo CoinOS wallet drained — refill it or wait for the daily refill cron" \
+            "2. NWC connection revoked/timed out — re-issue the NWC URL from CoinOS" \
+            "3. LIGHTNING_ENABLE_API_KEY Vercel env var stale — rotate + update Vercel" \
+            "4. LE producer API returning 5xx — check api.lightningenable.com/health" \
+            "5. Vercel function crashed — check Vercel logs for the run-agent function")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --repo "${GITHUB_REPOSITORY}" --body "$BODY"
             echo "Commented on existing issue #$existing"
