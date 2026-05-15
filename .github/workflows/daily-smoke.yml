@@ -140,20 +140,35 @@ jobs:
             fi
 
             echo "❌ Attempt ${attempt} failed (endpoint=${ENDPOINT_KIND}, http=${http_status:-?}, ok=${ok}, totalSats=${totalSats}, l402valid=${l402valid}, finalError='${finalError}')"
-            # Surface the agent's own error string if there was one,
-            # so the failure issue body tells the user *why* (insufficient
-            # balance / NWC timeout / 502 from LE / etc.) Also export it
-            # to GITHUB_ENV on EVERY failed attempt — including ones
-            # where the response had no JSON `.error` — so the
-            # notification step always reports THIS attempt's metadata,
-            # not stale data from an earlier attempt that happened to
-            # have a JSON body.
-            error=$(echo "$body" | jq -r '.error // ""' 2>/dev/null || true)
-            # Synthesize a placeholder if the response isn't JSON or
-            # has no error field — better than letting the next attempt
-            # potentially overwrite-only-if-non-empty leave stale data.
-            if [ -z "$error" ]; then
-              error="(no agent .error in body; HTTP=${http_status:-?}, likely Vercel/network failure)"
+            # Surface the agent's own error string so the failure issue
+            # body tells the user *why* (insufficient balance / NWC
+            # timeout / 502 from LE / etc.) Cascade through the most-
+            # specific signals first:
+            #   1. final.error — upstream provider failure AFTER the
+            #      L402 hop. This is the case the round-6 final.error
+            #      check was added to catch (HTTP 200 + ok:true but
+            #      the merchant returned a payload-level error from
+            #      weather/btc-price's upstream). Without surfacing it
+            #      here, the tracking issue would say "no agent
+            #      .error in body" and point the operator at the
+            #      wrong layer.
+            #   2. .error — agent-level error string (NWC timeout,
+            #      L402 verify rejection, etc.).
+            #   3. Synthesized placeholder if neither is present
+            #      (response wasn't JSON, or didn't include either
+            #      field — likely Vercel/network failure).
+            # Whichever fires, the value is exported to GITHUB_ENV on
+            # EVERY failed attempt so the notification step always
+            # reports THIS attempt's metadata, not stale data from an
+            # earlier attempt that happened to have a JSON body.
+            agent_error=$(echo "$body" | jq -r '.error // ""' 2>/dev/null || true)
+            if [ -n "$finalError" ]; then
+              # Upstream provider failure — most actionable signal.
+              error="upstream provider error after L402: ${finalError}"
+            elif [ -n "$agent_error" ]; then
+              error="$agent_error"
+            else
+              error="(no agent .error or final.error in body; HTTP=${http_status:-?}, likely Vercel/network failure)"
             fi
             echo "Agent error: $error"
             # Single-line truncate so newlines / special chars don't
@@ -203,10 +218,17 @@ jobs:
           # this repo will ever have for the daily-smoke surface;
           # if you blow through that, the tracking-issue strategy
           # itself has bigger problems.
-          # We also distinguish "lookup succeeded, no match" (create)
-          # from "lookup itself failed" (still create, with a marker
-          # — the round-5 reversal: notification beats deduplication
-          # purity during a transient gh/auth outage).
+          # We also distinguish "lookup succeeded, no match" (create
+          # a fresh tracking issue) from "lookup itself failed"
+          # (still create the issue, but tag the body with a
+          # "dedupe lookup failed" marker so the operator knows the
+          # workflow may have just produced a duplicate). The
+          # rationale: a smoke-test failure whose alert is silenced
+          # because GitHub's API returned a transient error defeats
+          # the workflow's whole purpose. Notification always wins
+          # over deduplication purity — the operator can manually
+          # consolidate duplicates after the fact, but they can't
+          # un-miss an alert that was never sent.
           lookup_err="$(mktemp)"
           if existing_json=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 200 --json number,title 2>"$lookup_err"); then
             existing=$(printf '%s' "$existing_json" | jq -r --arg t "$TITLE" '[.[] | select(.title == $t)] | .[0].number // empty')
@@ -238,15 +260,46 @@ jobs:
             "**Agent error:** ${AGENT_ERROR}" \
             "" \
             "Likely causes (in order of frequency):" \
-            "1. Demo CoinOS wallet drained — the sibling \`.github/workflows/daily-refill.yml\` workflow runs at 11:30 UTC daily to top up the wallet from OpenNode; check its last run, or manually trigger it via the Actions UI" \
+            "1. Demo CoinOS wallet drained — check whether a daily refill workflow has shipped in this repo (it tops up CoinOS from OpenNode); if present, look at its last run or trigger it manually from the Actions UI. Otherwise refill manually" \
             "2. NWC connection revoked/timed out — re-issue the NWC URL from CoinOS" \
             "3. LIGHTNING_ENABLE_API_KEY Vercel env var stale — rotate + update Vercel" \
             "4. LE producer API returning 5xx — check api.lightningenable.com/health" \
             "5. Vercel function crashed — check Vercel logs for the run-agent function" \
             "6. Upstream provider for \`${ENDPOINT_KIND}\` returned an error after the L402 hop (\`final.error\` present in the response) — check Vercel logs for the merchant endpoint, and the upstream provider's status page if available")
           if [ -n "$existing" ]; then
-            gh issue comment "$existing" --repo "${GITHUB_REPOSITORY}" --body "$BODY"
-            echo "Commented on existing issue #$existing"
+            # Try to comment on the existing tracking issue. The
+            # existing issue could be locked, deleted between
+            # lookup and comment, or the comment API could have a
+            # transient failure — in any of those cases, under
+            # `set -euo pipefail` the step would abort and the
+            # operator would get no notification of the current
+            # smoke failure. Fall back to creating a fresh issue
+            # with a body marker explaining what happened, so the
+            # operator at least gets the alert. (They can manually
+            # close the old issue or re-open the locked one later.)
+            comment_err="$(mktemp)"
+            if gh issue comment "$existing" --repo "${GITHUB_REPOSITORY}" --body "$BODY" 2>"$comment_err"; then
+              echo "Commented on existing issue #$existing"
+            else
+              echo "::warning::gh issue comment on #$existing failed; falling back to a fresh issue so the operator still gets notified. stderr: $(cat "$comment_err")"
+              FALLBACK_NOTE=$(printf '%s\n' \
+                "" \
+                "---" \
+                "⚠️ **Comment-on-existing failed.** An open tracking issue #${existing} exists with this title, but \`gh issue comment\` could not post to it (it may be locked, deleted, or the API call failed transiently). This is a fresh issue with the same content so the alert wasn't lost. Please consolidate manually.")
+              BODY_WITH_NOTE=$(printf '%s\n%s\n' "$BODY" "$FALLBACK_NOTE")
+              fallback_err="$(mktemp)"
+              if ! gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY_WITH_NOTE" --label "smoke-failure" 2>"$fallback_err"; then
+                echo "::warning::Fallback gh issue create with label failed; retrying without label. stderr: $(cat "$fallback_err")"
+                if ! gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY_WITH_NOTE" 2>"$fallback_err"; then
+                  echo "::error::Comment failed AND fallback create attempts both failed. Smoke alert was NOT delivered. comment-err: $(cat "$comment_err") | create-err: $(cat "$fallback_err")"
+                  rm -f "$comment_err" "$fallback_err"
+                  exit 1
+                fi
+              fi
+              rm -f "$fallback_err"
+              echo "Opened fallback issue (comment on existing #$existing failed)"
+            fi
+            rm -f "$comment_err"
           elif [ "$lookup_ok" -eq 1 ]; then
             # Lookup definitively said "no open issue with this title."
             # Try to create with the smoke-failure label; if --label
