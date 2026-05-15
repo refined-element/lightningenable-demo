@@ -70,10 +70,32 @@ jobs:
         run: |
           set -euo pipefail
           ENDPOINT="https://demo.lightningenable.com/api/run-agent"
-          PAYLOAD='{"endpoint":"weather","city":"Miami"}'
+
+          # Alternate between the two production endpoints by day-of-
+          # year parity. The demo exposes `weather` AND `btc-price`
+          # paths; both go through the same L402 challenge/pay/access
+          # cycle but hit different upstream providers, so a failure
+          # confined to one upstream wouldn't alert if we only ever
+          # smoke-tested the other. Alternating covers both over time
+          # without doubling the daily wallet drain (each run still
+          # pays one invoice).
+          # Parity rule: even day-of-year → weather, odd → btc-price.
+          # Deterministic, no random state needed, and easy to read
+          # from the workflow log if an alert mentions which endpoint
+          # was being exercised.
+          DAY_OF_YEAR=$(date -u +%-j)
+          if [ $((DAY_OF_YEAR % 2)) -eq 0 ]; then
+            ENDPOINT_KIND="weather"
+            PAYLOAD='{"endpoint":"weather","city":"Miami"}'
+          else
+            ENDPOINT_KIND="btc-price"
+            PAYLOAD='{"endpoint":"btc-price"}'
+          fi
+          echo "Today's smoke target: ${ENDPOINT_KIND} (day-of-year=${DAY_OF_YEAR})"
+          echo "SMOKE_ENDPOINT_KIND=${ENDPOINT_KIND}" >> "$GITHUB_ENV"
 
           for attempt in 1 2; do
-            echo "::group::Attempt ${attempt}/2"
+            echo "::group::Attempt ${attempt}/2 (${ENDPOINT_KIND})"
             response=$(curl -sS -X POST "$ENDPOINT" \
               -H 'Content-Type: application/json' \
               -d "$PAYLOAD" \
@@ -89,25 +111,35 @@ jobs:
             echo "$body" | jq . 2>/dev/null || echo "$body"
             echo "::endgroup::"
 
-            # Validate the four signals that distinguish a healthy flow
+            # Validate the signals that distinguish a healthy flow
             # from a degraded one:
             #   ok:true                — agent reported success
             #   totalSats > 0          — real sats moved (not a stub)
             #   final.l402.valid:true  — LE backend accepted the L402 token
+            #   final.error empty      — the upstream provider didn't
+            #     return an error AFTER the L402 was satisfied. Without
+            #     this check, an upstream weather/btc-price provider
+            #     outage would still pass smoke (the L402 hop is
+            #     healthy, the merchant returned HTTP 200, but the
+            #     payload field carries the provider's error and the
+            #     end user sees broken output). HTTP 200 + ok:true +
+            #     final.error means "we paid for and got back garbage."
             #   HTTP 200               — Vercel didn't kill the function
             ok=$(echo "$body" | jq -r '.ok // false' 2>/dev/null || echo "false")
             totalSats=$(echo "$body" | jq -r '.totalSats // 0' 2>/dev/null || echo "0")
             l402valid=$(echo "$body" | jq -r '.final.l402.valid // false' 2>/dev/null || echo "false")
+            finalError=$(echo "$body" | jq -r '.final.error // ""' 2>/dev/null || echo "")
 
             if [ "${http_status:-0}" = "200" ] \
                && [ "$ok" = "true" ] \
                && [ "$totalSats" -gt 0 ] 2>/dev/null \
-               && [ "$l402valid" = "true" ]; then
-              echo "✅ Attempt ${attempt} passed: ok=true, totalSats=${totalSats}, l402.valid=true"
+               && [ "$l402valid" = "true" ] \
+               && [ -z "$finalError" ]; then
+              echo "✅ Attempt ${attempt} passed (${ENDPOINT_KIND}): ok=true, totalSats=${totalSats}, l402.valid=true, no final.error"
               exit 0
             fi
 
-            echo "❌ Attempt ${attempt} failed (http=${http_status:-?}, ok=${ok}, totalSats=${totalSats}, l402valid=${l402valid})"
+            echo "❌ Attempt ${attempt} failed (endpoint=${ENDPOINT_KIND}, http=${http_status:-?}, ok=${ok}, totalSats=${totalSats}, l402valid=${l402valid}, finalError='${finalError}')"
             # Surface the agent's own error string if there was one,
             # so the failure issue body tells the user *why* (insufficient
             # balance / NWC timeout / 502 from LE / etc.) Also export it
@@ -151,24 +183,36 @@ jobs:
         run: |
           set -euo pipefail
           TITLE="Daily demo smoke test failed"
-          # Find a still-open issue with this exact title. Two layers:
-          #   1. `--search 'in:title "TITLE"'` narrows the server-side
-          #      query but it's a tokenized Lucene match, not exact —
-          #      anything containing those tokens could match.
-          #   2. We then filter client-side with jq for an exact
-          #      `.title == TITLE` so we never comment on an unrelated
-          #      open issue that happens to contain the same words.
-          # Separately, we must distinguish "lookup succeeded, no
-          # match" (proceed to create) from "lookup itself failed"
-          # (back off — opening a new issue on every transient
-          # GitHub/search blip is exactly the duplicate-alert
-          # behavior this section is supposed to prevent).
+          # Find a still-open issue with this exact title.
+          #
+          # Why not --search "in:title \"$TITLE\"":
+          #   Issue search is backed by GitHub's full-text index,
+          #   which is (a) eventually consistent (a newly-opened
+          #   issue may not appear in search results for a few
+          #   seconds to minutes) and (b) only returns one page of
+          #   results by default. A queued manual workflow_dispatch
+          #   that runs immediately after a scheduled run can race
+          #   the index update and "succeed" with no match, opening
+          #   a duplicate even though the concurrency group already
+          #   serialized the runs. The simple `gh issue list`
+          #   (no --search) reads the open-issue table directly and
+          #   is strongly consistent.
+          # We pull up to --limit 200 open issues (default sort:
+          # newest first), then filter client-side with jq for an
+          # exact `.title == TITLE`. 200 is comfortably more than
+          # this repo will ever have for the daily-smoke surface;
+          # if you blow through that, the tracking-issue strategy
+          # itself has bigger problems.
+          # We also distinguish "lookup succeeded, no match" (create)
+          # from "lookup itself failed" (still create, with a marker
+          # — the round-5 reversal: notification beats deduplication
+          # purity during a transient gh/auth outage).
           lookup_err="$(mktemp)"
-          if existing_json=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "in:title \"$TITLE\"" --json number,title 2>"$lookup_err"); then
+          if existing_json=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 200 --json number,title 2>"$lookup_err"); then
             existing=$(printf '%s' "$existing_json" | jq -r --arg t "$TITLE" '[.[] | select(.title == $t)] | .[0].number // empty')
             lookup_ok=1
           else
-            echo "::warning::gh issue list failed; skipping dedupe to avoid masking failure. stderr: $(cat "$lookup_err")"
+            echo "::warning::gh issue list failed; will create issue without dedupe. stderr: $(cat "$lookup_err")"
             existing=""
             lookup_ok=0
           fi
@@ -176,6 +220,7 @@ jobs:
           AGENT_ERROR="${LAST_AGENT_ERROR:-(no agent .error field — likely HTTP-level failure or non-JSON response)}"
           HTTP_STATUS="${LAST_HTTP_STATUS:-?}"
           ATTEMPT="${LAST_ATTEMPT:-?}"
+          ENDPOINT_KIND="${SMOKE_ENDPOINT_KIND:-?}"
           # Build the body via printf '%s\n'. The earlier heredoc
           # form preserved the 10-space YAML indentation on every body
           # line, which Markdown then rendered as one big code block.
@@ -186,17 +231,19 @@ jobs:
           BODY=$(printf '%s\n' \
             "🚨 The daily demo smoke test failed on $(date -u +%FT%TZ)." \
             "" \
+            "**Endpoint exercised:** \`${ENDPOINT_KIND}\` (alternates daily by day-of-year parity — even=weather, odd=btc-price)" \
             "**Run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             "" \
             "**Last attempt:** ${ATTEMPT}/2, HTTP ${HTTP_STATUS}" \
             "**Agent error:** ${AGENT_ERROR}" \
             "" \
             "Likely causes (in order of frequency):" \
-            "1. Demo CoinOS wallet drained — refill it or wait for the daily refill cron" \
+            "1. Demo CoinOS wallet drained — the sibling \`.github/workflows/daily-refill.yml\` workflow runs at 11:30 UTC daily to top up the wallet from OpenNode; check its last run, or manually trigger it via the Actions UI" \
             "2. NWC connection revoked/timed out — re-issue the NWC URL from CoinOS" \
             "3. LIGHTNING_ENABLE_API_KEY Vercel env var stale — rotate + update Vercel" \
             "4. LE producer API returning 5xx — check api.lightningenable.com/health" \
-            "5. Vercel function crashed — check Vercel logs for the run-agent function")
+            "5. Vercel function crashed — check Vercel logs for the run-agent function" \
+            "6. Upstream provider for \`${ENDPOINT_KIND}\` returned an error after the L402 hop (\`final.error\` present in the response) — check Vercel logs for the merchant endpoint, and the upstream provider's status page if available")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --repo "${GITHUB_REPOSITORY}" --body "$BODY"
             echo "Commented on existing issue #$existing"
