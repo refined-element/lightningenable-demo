@@ -450,6 +450,7 @@ export async function getBalance(nwcUrl, { timeoutMs = 10_000 } = {}) {
 
     ws.on("error", (err) => {
       clearTimeout(timer);
+      try { ws.close(); } catch {}
       reject(errWithTrace(`WebSocket error on ${hostOf(relay)}: ${err?.message || err}`, trace));
     });
   });

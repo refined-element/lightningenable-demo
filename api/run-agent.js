@@ -153,8 +153,20 @@ export default async function handler(req, res) {
     });
   }
 
-  // Validation passed — record the cooldown timestamp now so only
-  // legitimate work-doing requests consume it.
+  const nwcUrl = process.env.DEMO_AGENT_NWC_URL;
+  if (!nwcUrl) {
+    return res.status(500).json({
+      ok: false,
+      error:
+        "Demo agent wallet is not configured. Set DEMO_AGENT_NWC_URL in Vercel project settings to a funded NWC connection (e.g. coinos.io).",
+    });
+  }
+
+  // Validation passed AND environment configured — record the cooldown
+  // timestamp now so only legitimate work-doing requests consume it.
+  // Doing this AFTER the env-var check too means a misconfigured server
+  // (500-returning) doesn't burn the cooldown for visitors — they can
+  // retry as soon as the env var is fixed.
   ipLastSeen.set(ip, now);
   // Light prune so the Map doesn't grow unbounded over a long-warm
   // instance lifetime. Only sweeps when the Map gets larger than 1k
@@ -164,15 +176,6 @@ export default async function handler(req, res) {
     for (const [k, v] of ipLastSeen) {
       if (v < cutoff) ipLastSeen.delete(k);
     }
-  }
-
-  const nwcUrl = process.env.DEMO_AGENT_NWC_URL;
-  if (!nwcUrl) {
-    return res.status(500).json({
-      ok: false,
-      error:
-        "Demo agent wallet is not configured. Set DEMO_AGENT_NWC_URL in Vercel project settings to a funded NWC connection (e.g. coinos.io).",
-    });
   }
 
   // Build the target URL. Same host as ourselves so /api/premium/* resolves
