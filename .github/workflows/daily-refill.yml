@@ -22,16 +22,24 @@ name: Daily Demo Refill
 #   INSUFFICIENT_BALANCE), in addition to this workflow surfacing
 #   the refill failure directly.
 #
+# Skipped vs failed:
+#   The endpoint returns ok:true with skipped:true when the OpenNode
+#   balance is too low to cover the refill — that's the normal
+#   "system at rest with nothing to move" state during idle periods
+#   and is NOT alertable. The workflow treats skipped:true as success
+#   and just logs the reason.
+#
 # Failure handling:
-#   The endpoint returns clear error JSON. The workflow surfaces it
-#   and exits non-zero on any non-200 response — GitHub emails repo
-#   admins by default on a failed scheduled workflow. Most likely
-#   failure modes:
-#     - OpenNode account out of sats (refill itself can't run)
-#     - CoinOS LNURL-pay endpoint down (transient)
+#   Any other non-200 response, or a network error before HTTP, is
+#   treated as a real failure. The workflow opens (or comments on) a
+#   GitHub Issue via the `gh` CLI — same pattern as the smoke test
+#   workflow — so notifications reach the operator regardless of
+#   GitHub's default cron-failure email behavior. Most likely
+#   actually-alertable failure modes:
 #     - OPENNODE_WITHDRAWAL_API_KEY revoked or wrong scope
-#     - DEMO_REFILL_ADMIN_KEY mismatch between this workflow's
-#       secret and the Vercel env var
+#     - CoinOS LNURL-pay endpoint structurally broken (extended outage)
+#     - DEMO_REFILL_ADMIN_KEY mismatch between this workflow's secret
+#       and the Vercel env var
 
 on:
   schedule:
@@ -43,6 +51,7 @@ on:
 
 permissions:
   contents: read
+  issues: write  # required for the failure-notification step below
 
 jobs:
   refill:
@@ -54,29 +63,47 @@ jobs:
         env:
           ADMIN_KEY: ${{ secrets.DEMO_REFILL_ADMIN_KEY }}
         run: |
-          set -euo pipefail
+          # NOTE: deliberately NOT using `set -euo pipefail` here —
+          # `pipefail` would cause the curl-with-pipe-into-tee pattern
+          # below to abort the whole step on a non-2xx response,
+          # before our explicit check can categorize it. We check
+          # `${http_status}` ourselves and `exit 1` only on real
+          # failures.
+          set -u
 
           if [ -z "${ADMIN_KEY:-}" ]; then
             echo "::error::DEMO_REFILL_ADMIN_KEY secret is not set on this repo. Add it under Settings → Secrets and variables → Actions."
             exit 1
           fi
 
-          response=$(curl -sS -X POST https://demo.lightningenable.com/api/demo-refill \
+          # Write response body to a temp file, capture HTTP status
+          # via curl's --write-out. This avoids the prior pattern of
+          # appending `HTTP_STATUS:%{http_code}` to the body and
+          # parsing it back out with sed — fragile if the body
+          # itself happens to contain "HTTP_STATUS:" verbatim.
+          body_file=$(mktemp)
+          http_status=$(curl -sS -X POST https://demo.lightningenable.com/api/demo-refill \
             -H "Authorization: Bearer $ADMIN_KEY" \
             -H "Content-Type: application/json" \
             --max-time 30 \
-            -w '\nHTTP_STATUS:%{http_code}\n')
+            --write-out '%{http_code}' \
+            --output "$body_file" \
+            2>/dev/null) || http_status="curl-failed"
 
-          http_status=$(printf '%s\n' "$response" | sed -n 's/^HTTP_STATUS://p' | tail -n1)
-          body=$(printf '%s\n' "$response" | sed '/^HTTP_STATUS:/d')
+          body=$(cat "$body_file")
+          rm -f "$body_file"
 
-          echo "HTTP status: ${http_status:-unknown}"
+          echo "HTTP status: ${http_status}"
           echo "Body:"
           echo "$body" | jq . 2>/dev/null || echo "$body"
 
-          if [ "${http_status:-0}" != "200" ]; then
+          if [ "$http_status" = "curl-failed" ]; then
+            echo "::error::curl itself failed (DNS, TLS, max-time, etc.) — could not reach the refill endpoint."
+            exit 1
+          fi
+          if [ "$http_status" != "200" ]; then
             error=$(echo "$body" | jq -r '.error // ""' 2>/dev/null || true)
-            echo "::error::Refill failed (HTTP ${http_status:-?}). ${error}"
+            echo "::error::Refill failed (HTTP ${http_status}). ${error}"
             exit 1
           fi
 
@@ -86,7 +113,50 @@ jobs:
             exit 1
           fi
 
+          # Graceful-skip path: ok:true with skipped:true means OpenNode
+          # had insufficient balance (idle period — nothing to move).
+          # Log and exit success without sending an alert.
+          skipped=$(echo "$body" | jq -r '.skipped // false' 2>/dev/null || echo "false")
+          if [ "$skipped" = "true" ]; then
+            reason=$(echo "$body" | jq -r '.reason // ""' 2>/dev/null || true)
+            echo "ℹ️  Refill skipped: ${reason}"
+            exit 0
+          fi
+
           refillSats=$(echo "$body" | jq -r '.refillSats // "?"' 2>/dev/null || echo "?")
           withdrawalId=$(echo "$body" | jq -r '.withdrawal.id // "?"' 2>/dev/null || echo "?")
           status=$(echo "$body" | jq -r '.withdrawal.status // "?"' 2>/dev/null || echo "?")
           echo "✅ Refill submitted: ${refillSats} sats → CoinOS (withdrawal id=${withdrawalId}, status=${status})"
+
+      - name: Open / update tracking issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE="🚨 Daily demo refill failed"
+          existing=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number' 2>/dev/null || echo "")
+          BODY=$(cat <<EOF
+          The daily demo refill (OpenNode → CoinOS) failed on $(date -u +%FT%TZ).
+
+          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Likely causes (in order of frequency):
+          1. OPENNODE_WITHDRAWAL_API_KEY revoked, rotated, or wrong scope
+          2. DEMO_REFILL_ADMIN_KEY mismatch (Vercel env var vs GitHub secret)
+          3. CoinOS LNURL-pay endpoint down (transient — try \`workflow_dispatch\` rerun in a few min)
+          4. Vercel function crashed — check Vercel logs for the demo-refill function
+          5. OpenNode API base URL misconfigured (allowlist rejects it)
+
+          Note: "OpenNode balance too low" is NOT in this list — that
+          condition returns skipped:true and never fires this alert.
+          EOF
+          )
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "${GITHUB_REPOSITORY}" --body "$BODY"
+            echo "Commented on existing issue #$existing"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY" --label "refill-failure" 2>/dev/null \
+              || gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY"
+            echo "Opened new issue"
+          fi
