@@ -26,8 +26,9 @@
  *
  * Caller:
  *   .github/workflows/daily-refill.yml fires this at 11:30 UTC daily,
- *   30 min before the daily smoke test runs, so a freshly-refilled
- *   wallet is in place when the smoke validates the agent flow.
+ *   37 min before the daily smoke test (12:07 UTC), so a freshly-
+ *   refilled wallet is in place when the smoke validates the agent
+ *   flow.
  */
 
 import crypto from "node:crypto";
@@ -406,11 +407,25 @@ export default async function handler(req, res) {
  * unparseable or has an unsupported multiplier resolution.
  *
  * BOLT-11 amount format: `lnbc<amount><multiplier>...`
- *   - no multiplier:  amount is in whole BTC          (× 100_000_000 sats/BTC)
  *   - `m` (milli):    amount × 0.001 BTC              (× 100_000     sats)
  *   - `u` (micro):    amount × 0.000_001 BTC          (× 100         sats)
  *   - `n` (nano):     amount × 0.000_000_001 BTC      (÷ 10          sats; fraction)
  *   - `p` (pico):     amount × 0.000_000_000_001 BTC  (÷ 10_000      sats; fraction)
+ *
+ * The BOLT-11 spec also defines a no-multiplier form (`lnbc<amount>1`
+ * = whole BTC), but THIS PARSER REJECTS IT. Reasons:
+ *   - The demo refill flow only ever asks for sub-BTC amounts
+ *     (currently 200 sat), so accepting whole-BTC amounts would only
+ *     ever happen via a misbehaving CoinOS response or a crafted
+ *     attack — both of which we want to fail closed.
+ *   - The no-multiplier regex is ambiguous against the bech32
+ *     separator `1` (e.g. `lnbc1pv...` is an amount-LESS invoice,
+ *     where the `1` is the separator). An earlier regex variant
+ *     matched that shape as amount=1 / no-multiplier and returned
+ *     100M sats (1 BTC) — catastrophic. Requiring a multiplier
+ *     `[munp]` plus a literal `1` separator pins down the syntax.
+ * If you ever need whole-BTC support, change the regex AND add
+ * explicit tests for the bech32-separator confusion case.
  *
  * For REFILL_SATS=200, expected invoice prefix is `lnbc2u`. We
  * reject fractional results (nano/pico shapes whose amount isn't

@@ -87,10 +87,27 @@ jobs:
           # diagnostics survive for the failure message. Use
           # `|| http_status="curl-failed"` to convert non-zero exit
           # into a sentinel without aborting the step.
+          #
+          # --max-time budget:
+          #   The Vercel function's worst-case wall-clock is the sum
+          #   of its upstream fetch timeouts:
+          #     2 × CoinOS fetch (10s each) + 1 × OpenNode fetch (15s)
+          #     = 35s
+          #   plus a few seconds of overhead (auth, allowlist checks,
+          #   JSON serialization). The function is configured with
+          #   `maxDuration: 45` in vercel.json, so Vercel will kill it
+          #   at 45s.
+          #   Curl's --max-time must be LARGER than the function's
+          #   maxDuration; otherwise a slow-but-eventually-successful
+          #   upstream causes curl to abort at 30s with exit 28, the
+          #   workflow records a `curl-failed` and opens an alert
+          #   issue — even though the withdrawal may have been
+          #   submitted to OpenNode after curl gave up. 60s leaves
+          #   15s of headroom over the function's max wall-clock.
           http_status=$(curl -sS -X POST https://demo.lightningenable.com/api/demo-refill \
             -H "Authorization: Bearer $ADMIN_KEY" \
             -H "Content-Type: application/json" \
-            --max-time 30 \
+            --max-time 60 \
             --write-out '%{http_code}' \
             --output "$body_file" \
             2>"$err_file") || http_status="curl-failed"
