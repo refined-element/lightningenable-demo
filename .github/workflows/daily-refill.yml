@@ -1,0 +1,92 @@
+name: Daily Demo Refill
+
+# Why this exists:
+#   The live demo at demo.lightningenable.com drains sats from a
+#   small CoinOS NWC wallet on every "Run the agent" click. Sats
+#   accumulate in the OPPOSITE direction in the demo merchant's
+#   OpenNode account (each demo run pays the LE merchant — which is
+#   the operator's own account). Left alone, CoinOS empties and
+#   OpenNode fills; eventually demo flow breaks until manually
+#   refilled.
+#
+#   This workflow closes the loop daily: hit the /api/demo-refill
+#   endpoint, which moves a fixed small amount (200 sats by default)
+#   from OpenNode back to CoinOS via a Lightning withdrawal to the
+#   operator's CoinOS Lightning address.
+#
+# Why 11:30 UTC:
+#   30 min before the daily smoke test (12:00 UTC), so a fresh refill
+#   is in place when the smoke validates the agent flow. Order
+#   matters: smoke-after-refill means the smoke catches a refill
+#   failure indirectly (wallet didn't get topped up → smoke fails on
+#   INSUFFICIENT_BALANCE), in addition to this workflow surfacing
+#   the refill failure directly.
+#
+# Failure handling:
+#   The endpoint returns clear error JSON. The workflow surfaces it
+#   and exits non-zero on any non-200 response — GitHub emails repo
+#   admins by default on a failed scheduled workflow. Most likely
+#   failure modes:
+#     - OpenNode account out of sats (refill itself can't run)
+#     - CoinOS LNURL-pay endpoint down (transient)
+#     - OPENNODE_WITHDRAWAL_API_KEY revoked or wrong scope
+#     - DEMO_REFILL_ADMIN_KEY mismatch between this workflow's
+#       secret and the Vercel env var
+
+on:
+  schedule:
+    - cron: '30 11 * * *'  # 11:30 UTC daily
+  workflow_dispatch:
+    # Manual fire-now button in the Actions UI — useful for testing
+    # the wiring after first setup, or when the wallet ran dry between
+    # scheduled refills.
+
+permissions:
+  contents: read
+
+jobs:
+  refill:
+    name: Refill demo wallet from OpenNode → CoinOS
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: POST /api/demo-refill
+        env:
+          ADMIN_KEY: ${{ secrets.DEMO_REFILL_ADMIN_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ADMIN_KEY:-}" ]; then
+            echo "::error::DEMO_REFILL_ADMIN_KEY secret is not set on this repo. Add it under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+          response=$(curl -sS -X POST https://demo.lightningenable.com/api/demo-refill \
+            -H "Authorization: Bearer $ADMIN_KEY" \
+            -H "Content-Type: application/json" \
+            --max-time 30 \
+            -w '\nHTTP_STATUS:%{http_code}\n')
+
+          http_status=$(printf '%s\n' "$response" | sed -n 's/^HTTP_STATUS://p' | tail -n1)
+          body=$(printf '%s\n' "$response" | sed '/^HTTP_STATUS:/d')
+
+          echo "HTTP status: ${http_status:-unknown}"
+          echo "Body:"
+          echo "$body" | jq . 2>/dev/null || echo "$body"
+
+          if [ "${http_status:-0}" != "200" ]; then
+            error=$(echo "$body" | jq -r '.error // ""' 2>/dev/null || true)
+            echo "::error::Refill failed (HTTP ${http_status:-?}). ${error}"
+            exit 1
+          fi
+
+          ok=$(echo "$body" | jq -r '.ok // false' 2>/dev/null || echo "false")
+          if [ "$ok" != "true" ]; then
+            echo "::error::Refill endpoint returned ok=false. See body above for details."
+            exit 1
+          fi
+
+          refillSats=$(echo "$body" | jq -r '.refillSats // "?"' 2>/dev/null || echo "?")
+          withdrawalId=$(echo "$body" | jq -r '.withdrawal.id // "?"' 2>/dev/null || echo "?")
+          status=$(echo "$body" | jq -r '.withdrawal.status // "?"' 2>/dev/null || echo "?")
+          echo "✅ Refill submitted: ${refillSats} sats → CoinOS (withdrawal id=${withdrawalId}, status=${status})"
