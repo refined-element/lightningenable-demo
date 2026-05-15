@@ -32,6 +32,24 @@ test("does NOT match 'Insufficient API key scope' (auth scope regression case)",
   assert.equal(isInsufficientBalanceError(400, "Insufficient API key scope"), false);
 });
 
+test("does NOT match 'balance is high but permissions too low' (round-8 greedy-wildcard regression)", () => {
+  // Round-8 finding: the third branch's greedy .* used to let the
+  // regex match this message — "balance" appeared early, then
+  // "too low" appeared later in an unrelated clause. The tightened
+  // version requires balance/funds and "low" to be in the same
+  // clause (separated only by short connector words: is/are/too/
+  // very/quite/running/getting).
+  assert.equal(isInsufficientBalanceError(400, "Account balance is high but permissions too low"), false);
+});
+
+test("does NOT match 'balance is fine but token scope too low' (round-8 regression)", () => {
+  assert.equal(isInsufficientBalanceError(400, "Wallet balance is fine but token scope too low"), false);
+});
+
+test("does NOT match 'funds available but rate limit too low' (round-8 regression)", () => {
+  assert.equal(isInsufficientBalanceError(400, "Funds available but rate limit too low"), false);
+});
+
 test("does NOT match 'Insufficient privileges'", () => {
   assert.equal(isInsufficientBalanceError(400, "Insufficient privileges"), false);
 });

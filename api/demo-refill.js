@@ -302,6 +302,34 @@ export default async function handler(req, res) {
   }
   log("invoice_amount_verified", { sats: parsedSats });
 
+  // Known limitation: we don't parse / validate the BOLT-11 expiry
+  // tag here. CoinOS issues invoices with a default expiry (commonly
+  // 600 seconds). OpenNode's withdrawal API submits asynchronously
+  // — its synchronous response is "submitted, status=pending" and
+  // the on-chain (or off-chain) settlement happens after the HTTP
+  // call returns. If OpenNode happens to queue the withdrawal long
+  // enough that the invoice expires before payment is attempted,
+  // the settlement will fail asynchronously and we won't know from
+  // this endpoint's response — the operator only learns about it
+  // from OpenNode's dashboard (or by inspecting the refill's
+  // failure to actually credit CoinOS).
+  //
+  // We intentionally accept this tradeoff because:
+  //   1. The daily refill cron is the only caller, and 600s is more
+  //      than enough headroom for OpenNode's normal queue latency
+  //      (typically sub-minute).
+  //   2. Adding expiry validation would require pulling in a
+  //      BOLT-11 decoder (not just the prefix parser we already
+  //      have) — significant code surface for a low-probability
+  //      failure mode in a manually-recoverable system.
+  //   3. The daily-smoke workflow exercises the demo flow 37 min
+  //      AFTER this runs, and INSUFFICIENT_BALANCE on the smoke
+  //      side surfaces a refill failure indirectly with one day's
+  //      latency at most.
+  // If demand ever shifts to faster recovery, the right fix is to
+  // poll OpenNode's `GET /v2/withdrawal/{id}` for transition to
+  // confirmed/failed and surface that asynchronously.
+
   // ── 5. Ask OpenNode to pay that invoice ──────────────────────────────
   // OpenNode's withdrawal API: POST /v2/withdrawals with the bolt11
   // as the `address` field. Auth via raw API key in the
@@ -459,28 +487,57 @@ function parseBolt11Sats(bolt11) {
   // amounts).
   const m = bolt11.toLowerCase().match(/^ln(bc|tb)(\d+)([munp])1/);
   if (!m) return null;
+  // Defense-in-depth bound on the digit run. A crafted invoice like
+  // `lnbc999999999999999m1...` would `parseInt` to a finite Number
+  // (JS numbers are doubles, so parseInt happily returns values
+  // above Number.MAX_SAFE_INTEGER as imprecise floats) and then the
+  // `amount * 100_000` line for the milli multiplier would silently
+  // produce an imprecise result. Today this isn't exploitable
+  // because the caller strict-equality compares the result to
+  // REFILL_SATS (currently 200), but adding an upper bound makes
+  // the parser safer for any future caller that doesn't apply that
+  // check. We reject any amount where the digit run is implausibly
+  // long for a real invoice — the largest legitimate BOLT-11 amount
+  // is 2_100_000_000_000_000 pico-BTC (21M BTC, the bitcoin supply
+  // cap), which is 16 digits. We cap at 18 digits as a comfortable
+  // ceiling.
+  if (m[2].length > 18) return null;
   const amount = parseInt(m[2], 10);
   const mult = m[3];
   if (!Number.isFinite(amount) || amount <= 0) return null;
+  // After multiplier conversion, the result must still fit in a
+  // safe-integer sat value. 21M BTC = 2.1e15 sats, well below
+  // Number.MAX_SAFE_INTEGER (9.0e15), so a legitimate invoice can't
+  // overflow — but a crafted one with a permitted multiplier and a
+  // large pre-multiplier amount could. Belt and suspenders: cap the
+  // final sat output at 100M sat (1 BTC). The demo only ever pays
+  // 200 sat refills; anything approaching 1 BTC is, by definition,
+  // not what we asked CoinOS for.
+  const MAX_SATS = 100_000_000;
+  const computed = (() => {
   // Conversion phrasings deliberately match the header docstring's
   // "÷ N sats" form so the two don't drift. (Earlier these were
   // "amount × 0.0001 sats" / "amount × 0.1 sats", which is the same
   // math but inverted phrasing and harder to reconcile against the
   // header at a glance.)
-  switch (mult) {
-    case "m": return amount * 100_000;
-    case "u": return amount * 100;
-    case "n":
-      // nano: amount ÷ 10 sats; must be a multiple of 10 to yield whole sats
-      if (amount % 10 !== 0) return null;
-      return amount / 10;
-    case "p":
-      // pico: amount ÷ 10_000 sats; must be a multiple of 10_000 to yield whole sats
-      if (amount % 10_000 !== 0) return null;
-      return amount / 10_000;
-    default:
-      return null;
-  }
+    switch (mult) {
+      case "m": return amount * 100_000;
+      case "u": return amount * 100;
+      case "n":
+        // nano: amount ÷ 10 sats; must be a multiple of 10 to yield whole sats
+        if (amount % 10 !== 0) return null;
+        return amount / 10;
+      case "p":
+        // pico: amount ÷ 10_000 sats; must be a multiple of 10_000 to yield whole sats
+        if (amount % 10_000 !== 0) return null;
+        return amount / 10_000;
+      default:
+        return null;
+    }
+  })();
+  if (computed === null) return null;
+  if (computed >= MAX_SATS) return null;
+  return computed;
 }
 
 /**
@@ -505,10 +562,20 @@ function parseBolt11Sats(bolt11) {
 function isInsufficientBalanceError(httpStatus, message) {
   if (httpStatus !== 400 && httpStatus !== 402) return false;
   const msg = (message ?? "").toString();
+  // Each branch requires balance/funds to appear within a tight
+  // local window of the quantity word — no .* wildcards that could
+  // span clauses. The third branch in particular used to be
+  // `/(balance|funds)[^a-z0-9]+.*(too[^a-z0-9]+)?low/i`, where the
+  // greedy `.*` let it match "Account balance is high but
+  // permissions too low" — an auth failure with the word "balance"
+  // anywhere earlier in the message. The replacement requires
+  // balance/funds and "low" to be separated only by short connector
+  // words (`is`, `too`, `very`, `quite`, `running`, etc.) so the
+  // two have to be in the same clause.
   return (
     /insufficient[^a-z0-9]+(available[^a-z0-9]+)?(balance|funds)/i.test(msg) ||
     /not[^a-z0-9]+enough[^a-z0-9]+(balance|funds)/i.test(msg) ||
-    /(balance|funds)[^a-z0-9]+.*(too[^a-z0-9]+)?low/i.test(msg) ||
+    /(balance|funds)(\s+(is|are|too|very|quite|running|getting)){0,3}\s+(too\s+)?low/i.test(msg) ||
     /low[^a-z0-9]+(balance|funds)/i.test(msg) ||
     /no[^a-z0-9]+funds/i.test(msg)
   );
@@ -536,17 +603,32 @@ function isInsufficientBalanceError(httpStatus, message) {
 function redactSensitive(text, exactKey) {
   if (typeof text !== "string") return text;
   const UUID_RE = /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g;
+  // Per-call random nonce for the UUID sentinel. The previous
+  // version used a fixed `\x00UUID<n>\x00` token — if some
+  // adversarial input contained that literal substring (a proxy
+  // echo, a test fixture, an attacker payload), the final
+  // restoration step would replace it with `uuidMatches[n]`, which
+  // is `undefined` when no UUIDs were extracted at that index,
+  // producing the literal string "undefined" in the output. The
+  // random nonce makes pre-existing collisions vanishingly unlikely:
+  // 128 bits of entropy means an attacker would need ~2^64 attempts
+  // to land one, and they'd need to do it BEFORE the function ran
+  // (since the nonce is regenerated each call). The nonce is plain
+  // hex so it can't accidentally contain regex metacharacters.
+  const nonce = crypto.randomBytes(16).toString("hex");
   const uuidMatches = [];
   const withoutUuids = text.replace(UUID_RE, (m) => {
     uuidMatches.push(m);
-    return `\x00UUID${uuidMatches.length - 1}\x00`;
+    return `\x00${nonce}${uuidMatches.length - 1}\x00`;
   });
   let redacted = withoutUuids;
   if (exactKey) {
     redacted = redacted.split(exactKey).join("[redacted]");
   }
   redacted = redacted.replace(/[A-Za-z0-9_-]{65,}/g, "[redacted]");
-  return redacted.replace(/\x00UUID(\d+)\x00/g, (_, i) => uuidMatches[Number(i)]);
+  // Build a regex that only matches the per-call nonce.
+  const restoreRe = new RegExp(`\\x00${nonce}(\\d+)\\x00`, "g");
+  return redacted.replace(restoreRe, (_, i) => uuidMatches[Number(i)]);
 }
 
 // Named exports for unit tests. `default` is the HTTP handler — Vercel

@@ -127,6 +127,27 @@ test("does not strip a 64-char hex string (at the threshold boundary)", () => {
   assert.match(out, new RegExp(hex64));
 });
 
+test("input containing a literal sentinel-shaped substring does NOT produce 'undefined'", () => {
+  // Round-8 finding: the previous implementation used the fixed
+  // sentinel `\x00UUID<n>\x00` to round-trip UUIDs through the
+  // redaction passes. If the input ever contained that literal
+  // substring (proxy echo, attacker-crafted error message, test
+  // fixture), the final restoration step would replace it with
+  // `uuidMatches[n]`, which is `undefined` when no UUIDs were
+  // extracted at that index — leaking the string "undefined" into
+  // the output. The round-8 fix uses a per-call random nonce so
+  // pre-existing collisions are vanishingly unlikely.
+  //
+  // The new sentinel embeds 128 bits of entropy, regenerated each
+  // call, so we can't predict it ahead of time. We instead verify
+  // the failure-mode symptom: no occurrence of the literal string
+  // "undefined" in the output, given an adversarial input.
+  const adversarial = "User said: \x00UUID0\x00 and also \x00UUID5\x00";
+  const out = redactSensitive(adversarial, "fake-key");
+  assert.ok(!out.includes("undefined"),
+    "input that contains the OLD fixed sentinel must not produce 'undefined' in the output");
+});
+
 test("redacts a 65-char run (one above threshold)", () => {
   const blob65 = "z".repeat(65);
   const out = redactSensitive(`blob=${blob65}`, "different-key");

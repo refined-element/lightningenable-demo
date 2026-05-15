@@ -105,6 +105,29 @@ test("mainnet/testnet only — signet (lntbs) is not accepted", () => {
   assert.equal(parseBolt11Sats("lntbs2u1pv9xyz"), null);
 });
 
+test("rejects implausibly long digit run (round-8 overflow defense)", () => {
+  // Round-8 finding: parseInt accepts arbitrarily long digit runs
+  // without bounds checking. A crafted invoice like
+  // `lnbc999999999999999m1...` would parse to a finite Number
+  // (above MAX_SAFE_INTEGER, imprecise) and then the multiplier
+  // line would silently produce a bogus result. We reject any
+  // digit run longer than 18 chars before parseInt runs.
+  assert.equal(parseBolt11Sats("lnbc1234567890123456789u1pv9xyz"), null);
+});
+
+test("rejects amounts that resolve above 100M sats (round-8 cap)", () => {
+  // Defense-in-depth ceiling: even legitimate-looking invoices for
+  // amounts >= 1 BTC are rejected, because the demo only ever asks
+  // for 200 sat refills. 100_000m = 100_000 × 100_000 = 10_000_000_000 sats
+  // (100 BTC), well above the cap.
+  assert.equal(parseBolt11Sats("lnbc100000m1pv9xyz"), null);
+  // 2m = 200_000 sats (still under 100M, allowed)
+  assert.equal(parseBolt11Sats("lnbc2m1pv9xyz"), 200_000);
+  // 1000m = 100_000_000 sats (= 1 BTC, exactly at cap; rejected)
+  // Cap is "> MAX_SATS", and MAX_SATS = 100M, so 100M itself is rejected.
+  assert.equal(parseBolt11Sats("lnbc1000m1pv9xyz"), null);
+});
+
 test("non-string inputs return null without throwing", () => {
   assert.equal(parseBolt11Sats(null), null);
   assert.equal(parseBolt11Sats(undefined), null);
