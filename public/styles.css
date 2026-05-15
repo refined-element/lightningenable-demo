@@ -561,6 +561,16 @@ pre.code {
    95vw / 95vh caps keep the image away from the viewport edges and
    leave room for a visible close button. */
 .lightbox {
+  /* Center the modal. The user-agent stylesheet for dialog:modal
+     defaults to `position: fixed; inset: 0; margin: auto`, which
+     would center automatically — but our `* { margin: 0 }` reset at
+     the top of this file stomps the auto margin. Setting `inset` +
+     `margin: auto` explicitly here overrides the reset and restores
+     centering. (Without this, `inset: 0` still applies from the UA
+     sheet but `margin: 0` from the reset pins the dialog to the
+     top-left corner of its containing box.) */
+  inset: 0;
+  margin: auto;
   border: none;
   background: transparent;
   padding: 0;
