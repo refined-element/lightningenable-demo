@@ -200,17 +200,33 @@ jobs:
             # reports THIS attempt's metadata, not stale data from an
             # earlier attempt that happened to have a JSON body.
             agent_error=$(echo "$body" | jq -r '.error // ""' 2>/dev/null || true)
+            # Cascade order, most-specific-first:
+            #
+            #   1. final.error — upstream provider explicitly told
+            #      the merchant endpoint something went wrong AFTER
+            #      L402 succeeded. Most actionable.
+            #   2. .error — agent-level error string. This MUST be
+            #      checked before the degraded-payload fallback,
+            #      because a real `{ok:false, error:"Agent wallet
+            #      failed..."}` response also has missing final.*
+            #      fields. If we checked degraded-payload first,
+            #      a real wallet/LE/Vercel failure would be reported
+            #      as "endpoint returned HTTP 200 with no usable data"
+            #      and the operator would never see the actual error
+            #      string. (Round-9 finding — original cascade had
+            #      degraded-payload above .error and got this wrong.)
+            #   3. Degraded payload — HTTP 200 + ok:true + L402 valid
+            #      + no final.error but the endpoint-specific data
+            #      field is null/missing. Catches partial upstream
+            #      breakage that doesn't surface as an explicit
+            #      error string.
+            #   4. Generic placeholder — nothing parsable.
             if [ -n "$finalError" ]; then
-              # Upstream provider failure — most actionable signal.
               error="upstream provider error after L402: ${finalError}"
-            elif [ "$dataValid" != "true" ]; then
-              # Degraded payload: HTTP 200 + L402 valid but the
-              # endpoint-specific data field is null/missing. Less
-              # severe than final.error (no explicit upstream error
-              # string) but still user-visible breakage.
-              error="degraded payload: ${data_field}=${dataVal} (endpoint ${ENDPOINT_KIND} returned HTTP 200 with no usable data; check the merchant's upstream provider)"
             elif [ -n "$agent_error" ]; then
               error="$agent_error"
+            elif [ "$dataValid" != "true" ]; then
+              error="degraded payload: ${data_field}=${dataVal} (endpoint ${ENDPOINT_KIND} returned HTTP 200 with no usable data; check the merchant's upstream provider)"
             else
               error="(no agent .error or final.error in body; HTTP=${http_status:-?}, likely Vercel/network failure)"
             fi
