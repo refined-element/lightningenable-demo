@@ -207,16 +207,50 @@
   // handler since <dialog> doesn't close on backdrop click natively.
   // ImageElement.src is set right before each open, so the same
   // <dialog> instance serves all four cards without per-card markup.
+  //
+  // Accessibility: <img> elements aren't keyboard-focusable by default,
+  // so we set tabindex="0" + role="button" on each lightbox-able img
+  // and add an Enter/Space key handler. Keyboard and screen-reader
+  // users get the same zoom affordance.
+  //
+  // Re-entrancy: showModal() throws InvalidStateError if the dialog is
+  // already open. Guard with .open check so rapid double-clicks (or
+  // clicking another card while one is open) silently swap the image
+  // instead of crashing.
   const lightbox = document.getElementById("screenshot-lightbox");
   if (lightbox) {
     const lightboxImg = lightbox.querySelector(".lightbox-img");
     const lightboxClose = lightbox.querySelector(".lightbox-close");
+
+    function openLightbox(img) {
+      if (!lightboxImg) return;
+      lightboxImg.src = img.src;
+      lightboxImg.alt = img.alt;
+      if (!lightbox.open) {
+        try { lightbox.showModal(); }
+        catch (e) {
+          // Older browsers (legacy Safari) may not support showModal.
+          // Fall back to the standard `open` attribute so the dialog
+          // is at least visible — no focus trap, but better than a
+          // silent failure.
+          lightbox.setAttribute("open", "");
+        }
+      }
+    }
+
     document.querySelectorAll(".dashboard-card .dashboard-img").forEach((img) => {
-      img.addEventListener("click", () => {
-        if (!lightboxImg) return;
-        lightboxImg.src = img.src;
-        lightboxImg.alt = img.alt;
-        lightbox.showModal();
+      img.setAttribute("tabindex", "0");
+      img.setAttribute("role", "button");
+      img.setAttribute("aria-label", `Open full-size: ${img.alt || "screenshot"}`);
+      img.addEventListener("click", () => openLightbox(img));
+      img.addEventListener("keydown", (e) => {
+        // Enter and Space are the standard activation keys for a
+        // button-like control. preventDefault on Space stops page
+        // scrolling.
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openLightbox(img);
+        }
       });
     });
     // Backdrop click closes the dialog. The native <dialog> backdrop
