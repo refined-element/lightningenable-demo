@@ -51,10 +51,18 @@ a:hover { text-decoration: underline; }
   justify-content: space-between;
   padding: 1.25rem var(--gutter);
   gap: 1rem;
-  position: relative;
-  z-index: 10;
-  /* No bottom border — the hero's radial-gradient overlay just below
-     visually separates the header without needing a hairline. */
+  /* Sticky on scroll so the CTA stays reachable after the visitor
+     has scrolled past the hero. backdrop-filter blurs whatever's
+     underneath (the hero's radial gradient, then the dark sections)
+     for a high-end "always glass" feel — Stripe / Tempo style. */
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: rgba(10, 10, 10, 0.78);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.2s, background 0.2s;
 }
 .site-brand {
   display: inline-flex;
@@ -736,3 +744,105 @@ pre.code {
 .footer-links { display: flex; gap: 1.5rem; justify-content: center; flex-wrap: wrap; }
 .footer-links a { color: var(--dim); }
 .footer-links a:hover { color: var(--bolt); text-decoration: none; }
+
+/* ─── Post-demo summary (under the trace pre, after a successful run)
+ *    Plain-English interpretation of the JSON so non-developer
+ *    visitors don't bounce on the raw payload. Populated by app.js;
+ *    starts hidden and reveals via the .hidden toggle when a run
+ *    settles green. */
+.run-summary {
+  margin-top: 1.25rem;
+  padding: 0.9rem 1.1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--bolt);
+  background: var(--bolt-soft);
+  color: var(--white);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+.run-summary strong { color: var(--bolt); }
+
+/* ─── L402-in-one-sentence callout
+ *    Smaller, more concentrated than a regular section. Sits right
+ *    after the demo to convert "I saw something happen" into
+ *    "I understand what just happened" before the visitor scrolls
+ *    into the business case. */
+.section-callout {
+  padding-top: 4rem;
+  padding-bottom: 4rem;
+  text-align: center;
+}
+.callout-eyebrow {
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--bolt);
+  margin-bottom: 1rem;
+}
+.callout-text {
+  font-size: clamp(1.15rem, 2vw, 1.45rem);
+  line-height: 1.55;
+  color: var(--white);
+  max-width: 62ch;
+  margin: 0 auto;
+}
+.callout-text strong { color: var(--bolt); }
+
+/* ─── Why-now section ─── */
+/* Uses the standard .section scaffolding; stacks 4 lede paragraphs
+ * with a tighter rhythm than the default so the "this matters now"
+ * argument reads as one continuous thought rather than four
+ * disconnected points. */
+.section-now .section-lede {
+  margin-bottom: 1.25rem;
+}
+.section-now .section-lede:last-child {
+  margin-bottom: 0;
+  color: var(--white);
+  font-weight: 500;
+}
+
+/* ─── Trust / proof strip ─── */
+.section-proof .section-title {
+  text-align: center;
+  margin-bottom: 3rem;
+}
+.proof-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1.25rem;
+}
+.proof-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+}
+.proof-card p {
+  color: var(--dim);
+  font-size: 0.95rem;
+  line-height: 1.55;
+  margin: 0;
+}
+.proof-card p strong { color: var(--white); }
+.proof-card a { color: var(--bolt); }
+.proof-eyebrow {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--bolt);
+  margin-bottom: 0.85rem;
+}
+
+/* ─── Pricing — audience-fit paragraph ─── */
+/* Sits between the price line and the feature list, in the same
+ * dim color as the section ledes elsewhere so it reads as
+ * supporting context rather than a competing feature claim. */
+.pricing-who {
+  color: var(--dim);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  margin: 0.5rem 0 1.25rem;
+}
