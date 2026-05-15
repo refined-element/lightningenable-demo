@@ -326,6 +326,13 @@ a:hover { text-decoration: underline; }
 }
 .param-row input:focus,
 .param-row select:focus { border-color: var(--bolt); }
+.param-hint {
+  margin: 0.5rem 0 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--dim);
+  letter-spacing: 0.01em;
+}
 .hidden { display: none !important; }
 
 /* ─── Trace timeline ──────────────────────────────────── */
