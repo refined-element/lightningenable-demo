@@ -71,7 +71,12 @@ a:hover { text-decoration: underline; }
 }
 .site-brand:hover { text-decoration: none; }
 .site-logo {
-  height: clamp(28px, 4.5vw, 38px);
+  /* Bumped from clamp(28px, 4.5vw, 38px). The original sizing was
+     tuned for a focused demo page where the brand mark was decorative;
+     now that this is the production homepage, the wordmark needs to
+     be readable at a glance — especially on mobile where the prior
+     28px floor read as a thumbnail. */
+  height: clamp(36px, 5.5vw, 48px);
   width: auto;
   display: block;
 }
@@ -647,6 +652,14 @@ pre.code {
   border-radius: var(--radius);
   padding: 2rem;
   transition: border-color 0.2s, transform 0.2s;
+  /* Flex column so .pricing-actions can pin to the bottom of each
+     card via `margin-top: auto`. Without this, the Individual /
+     Business cards' CTA rows sat at different vertical positions
+     because their feature lists have different text-wrap heights —
+     the CTAs aligning is what makes the side-by-side comparison
+     scan cleanly. */
+  display: flex;
+  flex-direction: column;
 }
 .pricing-card:hover { border-color: var(--bolt); transform: translateY(-2px); }
 .pricing-card-business {
@@ -688,7 +701,13 @@ pre.code {
   vertical-align: middle;
 }
 .pricing-actions {
-  margin-top: 1.5rem;
+  /* `margin-top: auto` pushes this block to the bottom of the
+     flex-column card so the primary CTA aligns across Individual /
+     Business regardless of how many lines each feature list wraps
+     to. The 1.5rem above-min keeps a comfortable gap even when
+     feature lists happen to be short. */
+  margin-top: auto;
+  padding-top: 1.5rem;
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
