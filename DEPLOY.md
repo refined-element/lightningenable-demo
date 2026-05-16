@@ -8,7 +8,7 @@ push to `main`. No CLI required.
 
 1. **Go to https://vercel.com/new** (logged in as the org that owns the other
    `refined-element` Vercel projects).
-2. **Import Git Repository** → select `refined-element/lightningenable-demo`.
+2. **Import Git Repository** → select `refined-element/lightningenable-site`.
    First time importing from the `refined-element` GitHub org, Vercel may ask
    you to install/grant the Vercel GitHub App on the org — same one-time
    step as the other projects.
@@ -90,11 +90,11 @@ For local dev with `vercel dev` (live function reloading + real env from
 Vercel):
 
 ```powershell
-cd F:\lightningenable-demo
+cd F:\lightningenable-demo (now the lightningenable-site repo on GitHub)
 npm install -g vercel    # if not installed
 vercel login             # interactive OAuth, one-time
 vercel link              # interactive — pick the existing
-                         # lightningenable-demo project
+                         # lightningenable-site project
 vercel env pull .env     # pulls production env vars into local .env
                          # (.env is gitignored)
 vercel dev               # opens http://localhost:3000
